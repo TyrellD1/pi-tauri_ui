@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pi</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <div class="side-top">
+          <div class="brand">
+            <div class="brand-mark">π</div>
+            <div class="brand-text">
+              <div class="brand-name">pi</div>
+              <div class="brand-sub" id="cwd-label">…</div>
+            </div>
+          </div>
+          <div class="side-actions">
+            <button id="btn-new" class="icon-btn" title="New chat (⌘N)">+</button>
+            <button id="btn-cwd" class="icon-btn" title="Change working directory">◦</button>
+          </div>
+        </div>
+        <div class="search-wrap">
+          <input id="search" placeholder="Search chats  ⌘K" autocomplete="off" spellcheck="false" />
+        </div>
+        <div id="chat-list" class="chat-list"></div>
+        <div class="side-foot">
+          <div id="conn-dot" class="conn"><span class="dot"></span><span id="conn-text">starting…</span></div>
+          <div class="side-foot-row">
+            <span id="ver-label">rpc · pi</span>
+            <button id="btn-settings" class="link-btn" title="Settings (⌘,)">settings</button>
+          </div>
+        </div>
+      </aside>
+      <main id="main">
+        <header id="chat-header">
+          <div class="chat-title-wrap">
+            <div id="chat-title">New chat</div>
+            <div id="chat-meta">—</div>
+          </div>
+          <div class="header-actions">
+            <select id="model-select" title="Model"></select>
+            <select id="thinking-select" title="Thinking level">
+              <option value="off">think off</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+            <button id="btn-stats" class="pill-btn" title="Session stats">stats</button>
+            <button id="btn-compact" class="pill-btn" title="Compact context">compact</button>
+            <button id="btn-export" class="pill-btn" title="Export HTML">export</button>
+          </div>
+        </header>
+        <div id="notices"></div>
+        <div id="messages" class="messages"></div>
+        <div id="composer-wrap">
+          <div id="queue-bar" class="queue-bar hidden"></div>
+          <div id="dialog-slot"></div>
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="Message pi…  (Enter to send, Shift+Enter for newline, Esc to stop)"></textarea>
+            <button id="btn-send" class="send-btn" title="Send (Enter)">↑</button>
+          </div>
+          <div class="composer-foot">
+            <span id="status-line">idle</span>
+            <span id="token-line"></span>
+          </div>
+        </div>
+      </main>
+      <div id="modal-root"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
