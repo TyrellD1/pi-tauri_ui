@@ -57,6 +57,8 @@ const connError = $("conn-error");
 let activeName = "";
 let cwd = "", sessions: SessionInfo[] = [], activePath: string | null = null;
 const projectChats = new Map<string, SessionInfo[]>();
+let discovered: string[] = [];
+let unlinked: { slug: string; sessions: SessionInfo[] }[] = [];
 let expandedProjects = new Set<string>();
 try {
   const raw = prefGet("pi-expanded");
@@ -537,19 +539,32 @@ function imgList(list: unknown): { data: string; mime: string }[] {
 }
 
 // ---------- projects + sidebar ----------
-function getProjects(): string[] {
+function addedProjects(): string[] {
   try {
-    const raw = prefGet("pi-projects");
+    const raw = prefGet("pi-added-projects");
     const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    const list = Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : [];
-    if (cwd && !list.includes(cwd)) list.unshift(cwd);
-    return list;
+    return Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : [];
   } catch {
-    return cwd ? [cwd] : [];
+    return [];
   }
 }
-function saveProjects(list: string[]) {
-  prefSet("pi-projects", JSON.stringify(list));
+function hiddenProjects(): Set<string> {
+  try {
+    const raw = prefGet("pi-hidden-projects");
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return new Set(Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+function getProjects(): string[] {
+  const hidden = hiddenProjects();
+  const list = [...discovered];
+  for (const a of addedProjects()) if (!list.includes(a)) list.push(a);
+  if (cwd && !list.includes(cwd)) list.unshift(cwd);
+  const visible = list.filter((p) => !hidden.has(p));
+  visible.sort((a, b) => (a === cwd ? -1 : b === cwd ? 1 : 0));
+  return visible;
 }
 function saveExpanded() {
   prefSet("pi-expanded", JSON.stringify([...expandedProjects]));
@@ -559,25 +574,40 @@ function baseName(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-async function fetchProjectChats(project: string, silent = true) {
-  try {
-    const res = await invokeChecked<{ sessions: SessionInfo[] }>("pi_project_chats", { cwd: project });
-    projectChats.set(project, res.sessions ?? []);
-  } catch (e) {
-    if (!projectChats.has(project)) projectChats.set(project, []);
-    if (!silent) notify({ text: `Couldn't list chats for ${baseName(project)}: ${String(e)}`, kind: "error" });
-  }
-  renderProjects();
-}
-
 async function refreshAllProjects() {
-  const list = getProjects();
-  saveProjects(list);
+  const gen = bootGen;
+  try {
+    const res = await invokeChecked<{
+      projects: { slug: string; cwd: string | null; sessions: SessionInfo[] }[];
+    }>("pi_all_projects");
+    if (gen !== bootGen) return;
+    discovered = [];
+    unlinked = [];
+    for (const p of res.projects ?? []) {
+      if (p.cwd) {
+        discovered.push(p.cwd);
+        projectChats.set(p.cwd, p.sessions ?? []);
+      } else {
+        unlinked.push({ slug: p.slug, sessions: p.sessions ?? [] });
+      }
+    }
+  } catch (e) {
+    if (gen === bootGen) {
+      notify({
+        text: `Couldn't list projects: ${String(e)}`,
+        kind: "error",
+        sticky: true,
+        retryLabel: "Retry",
+        onRetry: () => refreshAllProjects(),
+      });
+    }
+    return;
+  }
+  if (gen !== bootGen) return;
   if (cwd && !expandedProjects.has(cwd)) {
     expandedProjects.add(cwd);
     saveExpanded();
   }
-  await Promise.allSettled(list.filter((p) => p !== cwd).map((p) => fetchProjectChats(p, true)));
   renderProjects();
 }
 
@@ -585,7 +615,7 @@ function openAddProject() {
   openModal("Add project", (box, close) => {
     const p = document.createElement("p");
     p.className = "muted";
-    p.textContent = "Paste the full path of a project folder, e.g. /Users/you/workspace_a/projects/my-app. Its chats appear below.";
+    p.textContent = "Existing projects appear automatically. Add a brand-new folder here to point pi at it before it has any chats.";
     const lab = document.createElement("label");
     lab.textContent = "Project folder";
     lab.setAttribute("for", "m-project");
@@ -606,17 +636,14 @@ function openAddProject() {
       const path = inp.value.trim();
       close();
       if (!path) return;
-      const list = getProjects();
-      if (!list.includes(path)) {
-        saveProjects([...list, path]);
-        expandedProjects.add(path);
-        saveExpanded();
-        await fetchProjectChats(path);
-      } else {
-        expandedProjects.add(path);
-        saveExpanded();
-        renderProjects();
-      }
+      const added = addedProjects();
+      if (!added.includes(path)) prefSet("pi-added-projects", JSON.stringify([...added, path]));
+      const hidden = hiddenProjects();
+      if (hidden.delete(path)) prefSet("pi-hidden-projects", JSON.stringify([...hidden]));
+      expandedProjects.add(path);
+      saveExpanded();
+      projectChats.set(path, projectChats.get(path) ?? []);
+      await refreshAllProjects();
     };
     row.appendChild(c);
     row.appendChild(s);
@@ -631,7 +658,14 @@ function openAddProject() {
 }
 
 function removeProject(project: string) {
-  saveProjects(getProjects().filter((p) => p !== project));
+  const added = addedProjects();
+  if (added.includes(project)) {
+    prefSet("pi-added-projects", JSON.stringify(added.filter((p) => p !== project)));
+  } else {
+    const hidden = hiddenProjects();
+    hidden.add(project);
+    prefSet("pi-hidden-projects", JSON.stringify([...hidden]));
+  }
   projectChats.delete(project);
   expandedProjects.delete(project);
   saveExpanded();
@@ -658,7 +692,7 @@ async function openChat(project: string, path: string) {
   expandedProjects.add(project);
   saveExpanded();
   await switchSession(path);
-  await fetchProjectChats(project);
+  await refreshAllProjects();
 }
 
 function chatMatches(s: SessionInfo, q: string): boolean {
@@ -788,6 +822,69 @@ function renderProjects() {
       }
       section.appendChild(box);
     }
+    chatListEl.appendChild(section);
+  }
+  const hidden = hiddenProjects();
+  for (const u of unlinked) {
+    if (hidden.has(u.slug)) continue;
+    const list = u.sessions.filter((s) => chatMatches(s, q));
+    if (q && list.length === 0) continue;
+    const section = document.createElement("div");
+    section.className = "project-section";
+    section.setAttribute("role", "group");
+    section.setAttribute("aria-label", u.slug);
+    const row = document.createElement("div");
+    row.className = "p-row";
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "project-head open";
+    head.setAttribute("aria-expanded", "true");
+    head.title = `Original folder not found (${u.slug})`;
+    const chev = document.createElement("span");
+    chev.innerHTML = chevSvg();
+    const name = document.createElement("span");
+    name.className = "p-name";
+    name.textContent = u.slug;
+    const count = document.createElement("span");
+    count.className = "p-count";
+    count.textContent = String(list.length);
+    head.appendChild(chev);
+    head.appendChild(name);
+    head.appendChild(count);
+    head.onclick = () => {
+      notify({ text: `These chats live in ${u.slug}, but that folder no longer exists, so they can't be resumed.` });
+    };
+    row.appendChild(head);
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "p-x";
+    x.textContent = "✕";
+    x.title = "Hide these chats";
+    x.setAttribute("aria-label", `Hide chats from ${u.slug}`);
+    x.onclick = () => {
+      const h = hiddenProjects();
+      h.add(u.slug);
+      prefSet("pi-hidden-projects", JSON.stringify([...h]));
+      renderProjects();
+    };
+    row.appendChild(x);
+    section.appendChild(row);
+    const box = document.createElement("div");
+    box.className = "project-chats";
+    if (list.length === 0) {
+      const e = document.createElement("div");
+      e.className = "project-empty";
+      e.textContent = "No chats.";
+      box.appendChild(e);
+    } else {
+      for (const s of list.slice(0, 100)) {
+        const b = chatButton(s, "");
+        b.disabled = true;
+        b.title = "Original folder not found";
+        box.appendChild(b);
+      }
+    }
+    section.appendChild(box);
     chatListEl.appendChild(section);
   }
 }
@@ -1630,7 +1727,7 @@ async function handleEvent(p: PiEvent) {
   if (t === "agent_settled") {
     setBusy(false); pendingSend = null; renderSettled();
     // Keep live content visible while authoritative history is fetched.
-    await refreshMessages(); await refreshSessions(); await refreshStats();
+    await refreshMessages(); await refreshAllProjects(); await refreshStats();
     try { await refreshState(); } catch (e) { notify({text: `Couldn't refresh session: ${String(e)}`, kind: "error"}); }
   }
   if (t === "response" && p.success === false) notify({ text: `pi error: ${String(p.error ?? "Request failed")}`, kind: "error", sticky: true });

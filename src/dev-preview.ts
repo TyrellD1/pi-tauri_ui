@@ -28,6 +28,9 @@ function populated(): Message[] {
   ];
 }
 function resetData() { fixture.reset(scenario === 'Populated' ? populated() : []); running = false; queued = []; }
+function previewSessions() {
+  return Array.from({length:245},(_,i)=>({path:`/preview/chats/chat-${i}.jsonl`,id:String(i),name:i===0?'Refine the chat interface':null,preview:i===244?'Archived keyboard review':`Project conversation ${i+1}`,mtime:Date.now()-i*3600000,messageCount:10}));
+}
 function user(message: string, images: unknown[] = []): Message {
   return {role:'user',content:[...(message ? [{type:'text',text:message}] : []), ...images.map(im=>({...(im as object),type:'image'}))],timestamp:Date.now()};
 }
@@ -54,7 +57,8 @@ export function installPreview() {
       if(cmd === 'pi_spawn') { spawnCount++; if(args?.cwd) cwd=String(args.cwd); return {ok:true,cwd}; }
       if(cmd === 'pi_get_state') return {cwd,sessionFile:path,sessionName:scenario === 'Populated'?'Refine the chat interface':'New chat',thinkingLevel:'xhigh',isStreaming:running,model:{provider:'opencode-go',id:'muse-spark-1.3-contributor'}};
       if(cmd === 'pi_get_messages') return {messages:clone(fixture.messages)};
-      if(cmd === 'pi_list_sessions') return {sessions:Array.from({length:245},(_,i)=>({path:`/preview/chats/chat-${i}.jsonl`,id:String(i),name:i===0?'Refine the chat interface':null,preview:i===244?'Archived keyboard review':`Project conversation ${i+1}`,mtime:Date.now()-i*3600000,messageCount:10})),active:path};
+      if(cmd === 'pi_list_sessions') return {sessions:previewSessions(),active:path};
+      if(cmd === 'pi_all_projects') return {projects:[{slug:'--projects-pi-tauri_ui--',cwd,latest:Date.now(),sessions:previewSessions()}]};
       if(cmd === 'pi_get_models') return {models:[{provider:'opencode-go',id:'muse-spark-1.3-contributor'},{provider:'anthropic',id:'claude-sonnet-4'}],current:'opencode-go/muse-spark-1.3-contributor'};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
       if(cmd === 'pi_new_session') { path=`/preview/new-${++nextId}.jsonl`; resetData(); return {success:true}; }

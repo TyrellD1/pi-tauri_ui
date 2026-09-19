@@ -364,18 +364,76 @@ async fn pi_list_sessions(state: State<'_, Arc<PiManager>>) -> Result<Value, Str
     Ok(serde_json::json!({"sessions": out, "active": active}))
 }
 
-/// Forward slug: session dir for a cwd. Matches pi's own layout
-/// (`--Users-name-workspace_a-projects-foo--`). No RPC round-trip needed.
-fn slug_for(cwd: &str) -> String {
-    format!("--{}--", cwd.replace('/', "-").trim_matches('-'))
+/// Reverse a pi session slug (`--Users-name-workspace_a-projects-foo--`) back to
+/// its folder. Each `-` may have been a `/` or a literal hyphen, so enumerate
+/// every assignment and keep the ones that exist on disk, preferring fewer
+/// separators. Typical slugs need dozens of stat calls; cap pathological ones.
+fn resolve_slug(slug: &str) -> Option<String> {
+    let inner = slug.strip_prefix("--")?.strip_suffix("--")?;
+    if inner.is_empty() {
+        return None;
+    }
+    let tokens: Vec<&str> = inner.split('-').collect();
+    let gaps = tokens.len().saturating_sub(1);
+    if gaps > 20 {
+        let guess = format!("/{}", inner.replace('-', "/"));
+        return std::path::Path::new(&guess).is_dir().then(|| guess);
+    }
+    let mut best: Option<String> = None;
+    let mut best_seps = usize::MAX;
+    for mask in 0..(1u64 << gaps) {
+        let seps = mask.count_ones() as usize;
+        if seps >= best_seps {
+            continue;
+        }
+        let mut s = String::from("/");
+        for (i, t) in tokens.iter().enumerate() {
+            if i > 0 {
+                s.push(if (mask >> (i - 1)) & 1 == 1 { '/' } else { '-' });
+            }
+            s.push_str(t);
+        }
+        if std::path::Path::new(&s).is_dir() {
+            best_seps = seps;
+            best = Some(s);
+            if seps == 0 {
+                break;
+            }
+        }
+    }
+    best
 }
 
+/// Every project pi has touched on this machine: each session dir resolved to
+/// its folder (`cwd: null` when the folder is gone) with its chats inside.
+/// The sidebar renders this directly — no manual registration needed.
 #[tauri::command]
-async fn pi_project_chats(cwd: String) -> Result<Value, String> {
-    let dir = dirs::home_dir()
-        .map(|h| h.join(".pi").join("agent").join("sessions").join(slug_for(&cwd)));
-    let out = tokio::task::spawn_blocking(move || list_sessions(dir)).await.map_err(|e| e.to_string())??;
-    Ok(serde_json::json!({"sessions": out}))
+async fn pi_all_projects() -> Result<Value, String> {
+    let base = dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"));
+    let projects = tokio::task::spawn_blocking(move || {
+        let mut out: Vec<Value> = Vec::new();
+        let Some(base) = base else { return out; };
+        let Ok(entries) = std::fs::read_dir(&base) else { return out; };
+        for e in entries.flatten() {
+            let dir = e.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Some(slug) = dir.file_name().and_then(|s| s.to_str()).map(String::from) else { continue };
+            let Ok(sessions) = list_sessions(Some(dir)) else { continue };
+            let cwd = resolve_slug(&slug);
+            if cwd.is_none() && sessions.is_empty() {
+                continue; // degenerate slug dir, nothing to show
+            }
+            let latest = sessions.iter().filter_map(|s| s["mtime"].as_u64()).max().unwrap_or(0);
+            out.push(serde_json::json!({"slug": slug, "cwd": cwd, "latest": latest, "sessions": sessions}));
+        }
+        out.sort_by_key(|v| std::cmp::Reverse(v["latest"].as_u64().unwrap_or(0)));
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"projects": projects}))
 }
 
 fn list_sessions(dir: Option<PathBuf>) -> Result<Vec<Value>, String> {
@@ -428,6 +486,16 @@ mod tests {
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
     }
     #[test]
+    fn slug_round_trips_through_real_directories() {
+        let root = std::env::temp_dir().join(format!("pi-ui-slug-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("my-proj").join("sub_dir");
+        std::fs::create_dir_all(&nested).unwrap();
+        let slug = format!("--{}--", nested.to_string_lossy().replace('/', "-").trim_matches('-'));
+        assert_eq!(resolve_slug(&slug).as_deref(), Some(nested.to_string_lossy().as_ref()));
+        assert_eq!(resolve_slug("--no-such-dir-anywhere--"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn all_sessions_remain_available_and_names_are_read() {
         let dir = std::env::temp_dir().join(format!("pi-ui-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
@@ -464,7 +532,7 @@ fn main() {
             pi_set_name,
             pi_ui_response,
             pi_list_sessions,
-            pi_project_chats
+            pi_all_projects
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
