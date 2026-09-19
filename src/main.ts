@@ -217,8 +217,8 @@ function renderMessages() {
 
 function messageNode(m: AgentMessage): HTMLElement {
   const wrap = document.createElement("div");
-  const isUser = m.role === "user" || m.role === "bashExecution";
-  wrap.className = `msg ${isUser ? "user" : "assistant"}`;
+  const kind = m.role === "user" ? "user" : m.role === "bashExecution" ? "shell" : "assistant";
+  wrap.className = `msg ${kind}`;
   const avatar = m.role === "user" ? "Y" : m.role === "bashExecution" ? "$" : "π";
   const label = m.role === "user" ? "You" : m.role === "bashExecution" ? "Shell" : m.role === "toolResult" ? `Tool · ${String(m.toolName ?? "")}` : "pi";
   let inner = "";

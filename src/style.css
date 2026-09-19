@@ -171,6 +171,11 @@ body {
 .messages { flex: 1; overflow-y: auto; padding: 18px 18px 12px 18px; scroll-behavior: smooth; }
 .msg { margin-bottom: 14px; max-width: 860px; }
 .msg-row { display: flex; gap: 10px; }
+/* user messages hug the right; pi stays left */
+.msg.user .msg-row { flex-direction: row-reverse; }
+.msg.user .bubble { flex: 0 1 auto; max-width: 75%; margin-left: auto; }
+.msg.user .role-label { text-align: right; }
+.msg.user .msg-actions { justify-content: flex-end; }
 .avatar {
   width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
   display: grid; place-items: center; font-size: 12px; font-weight: 600;
@@ -178,6 +183,7 @@ body {
   margin-top: 1px;
 }
 .msg.user .avatar { background: var(--strong); color: var(--page); border-color: var(--strong); }
+.msg.shell .avatar { background: var(--strong); color: var(--page); border-color: var(--strong); }
 .bubble {
   flex: 1; min-width: 0;
   background: var(--surface); border: 1px solid var(--line);
