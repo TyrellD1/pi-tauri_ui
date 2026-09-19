@@ -259,6 +259,32 @@ body {
 .send-btn:disabled { opacity: 0.4; cursor: default; transform: none; }
 .composer-foot { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--quiet); font-family: var(--mono); }
 
+/* pasted-image attachments */
+.attach-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.attach-strip.hidden { display: none; }
+.attach-thumb { position: relative; width: 64px; height: 64px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.attach-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-thumb button { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line); background: var(--page); color: var(--quiet); font-size: 10px; line-height: 1; cursor: pointer; padding: 0; }
+.attach-thumb button:hover { color: var(--ink); }
+#composer-wrap.drag .composer { border-color: var(--ink); }
+
+/* images inside messages */
+.msg-img { display: block; max-width: 100%; max-height: 280px; border-radius: var(--radius); border: 1px solid var(--line); margin-top: 8px; cursor: zoom-in; }
+.msg-img.full { max-height: none; cursor: zoom-out; }
+
+/* running indicator: thin indeterminate bar under the header */
+#workbar { height: 2px; overflow: hidden; display: none; background: transparent; flex-shrink: 0; }
+body.working #workbar { display: block; }
+#workbar > div { height: 100%; width: 30%; background: var(--quiet); animation: workslide 1.1s linear infinite; }
+@keyframes workslide { from { transform: translateX(-110%); } to { transform: translateX(360%); } }
+
+/* quiet mode: just pi's words — hide tools, thinking, shell/tool chatter */
+body.quiet .tool-card,
+body.quiet .think-toggle,
+body.quiet .think-body,
+body.quiet .msg.tool,
+body.quiet .msg.shell { display: none; }
+
 /* dialogs (extension_ui_request) */
 .dialog-card {
   background: var(--surface); border: 1px solid var(--quiet);
@@ -307,5 +333,6 @@ body {
 @media (pointer: coarse) { .theme-toggle { width: 34px; height: 34px; } }
 @media (prefers-reduced-motion: reduce) {
   .messages { scroll-behavior: auto; }
-  .conn.busy .dot, .caret, .tool-head .t-dot.run { animation: none; }
+  .conn.busy .dot, .caret, .tool-head .t-dot.run, #workbar > div { animation: none; }
+  body.working #workbar { display: none; }
 }

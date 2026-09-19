@@ -66,17 +66,20 @@
             <button id="btn-stats" class="pill-btn" title="Session stats">stats</button>
             <button id="btn-compact" class="pill-btn" title="Compact context">compact</button>
             <button id="btn-export" class="pill-btn" title="Export HTML">export</button>
+            <button id="btn-quiet" class="pill-btn" title="Quiet mode: hide tool calls, thinking and results — just pi's words">quiet: off</button>
             <button id="btn-theme" class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme">
               <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
               <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
             </button>
           </div>
         </header>
+        <div id="workbar" aria-hidden="true"><div></div></div>
         <div id="notices"></div>
         <div id="messages" class="messages"><div id="messages-inner" class="messages-inner"></div></div>
         <div id="composer-wrap">
           <div id="queue-bar" class="queue-bar hidden"></div>
           <div id="dialog-slot"></div>
+          <div id="attach-strip" class="attach-strip hidden"></div>
           <div class="composer">
             <textarea id="input" rows="1" placeholder="Message pi…  (Enter to send, Shift+Enter for newline, Esc to stop)"></textarea>
             <button id="btn-send" class="send-btn" title="Send (Enter)">↑</button>

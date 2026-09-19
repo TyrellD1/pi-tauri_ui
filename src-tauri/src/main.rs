@@ -94,6 +94,25 @@ async fn request(state: &State<'_, Arc<PiManager>>, mut cmd: Value) -> Result<Va
     }
 }
 
+/// Map frontend attachments ([{data: base64, mimeType}]) to RPC ImageContent blocks.
+fn attach_images(cmd: &mut Value, images: Option<Vec<Value>>) {
+    let imgs: Vec<Value> = images
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|im| {
+            let data = im.get("data")?.as_str()?;
+            let mime = im.get("mimeType").and_then(|m| m.as_str()).unwrap_or("image/png");
+            if data.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({ "type": "image", "data": data, "mimeType": mime }))
+        })
+        .collect();
+    if !imgs.is_empty() {
+        cmd["images"] = Value::Array(imgs);
+    }
+}
+
 async fn fire(state: &State<'_, Arc<PiManager>>, cmd: Value) -> Result<(), String> {
     let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
     write_line(state, &line).await
@@ -190,9 +209,10 @@ async fn pi_spawn(cwd: Option<String>, app: AppHandle, state: State<'_, Arc<PiMa
 }
 
 #[tauri::command]
-async fn pi_prompt(message: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+async fn pi_prompt(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
     // fire-and-accept: response only means accepted/queued, events stream after
-    let cmd = serde_json::json!({ "type": "prompt", "message": message });
+    let mut cmd = serde_json::json!({ "type": "prompt", "message": message });
+    attach_images(&mut cmd, images);
     match request(&state, cmd).await {
         Ok(r) => {
             if r.get("success").and_then(|s| s.as_bool()) == Some(true) {
@@ -206,8 +226,10 @@ async fn pi_prompt(message: String, state: State<'_, Arc<PiManager>>) -> Result<
 }
 
 #[tauri::command]
-async fn pi_steer(message: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "steer", "message": message })).await?;
+async fn pi_steer(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+    let mut cmd = serde_json::json!({ "type": "steer", "message": message });
+    attach_images(&mut cmd, images);
+    let r = request(&state, cmd).await?;
     Ok(r)
 }
 

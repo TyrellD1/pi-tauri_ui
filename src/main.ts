@@ -5,7 +5,14 @@ import { listen } from "@tauri-apps/api/event";
 type MsgContent =
   | { type: "text"; text: string }
   | { type: "thinking"; thinking: string }
-  | { type: "toolCall"; id: string; name: string; arguments: unknown };
+  | { type: "toolCall"; id: string; name: string; arguments: unknown }
+  | { type: "image"; data: string; mimeType: string };
+
+interface PendingImage {
+  data: string;
+  mimeType: string;
+  bytes: number;
+}
 
 interface AgentMessage {
   role: string;
@@ -51,6 +58,8 @@ const connDot = $("conn-dot");
 const connText = $("conn-text");
 const searchEl = $("search") as HTMLInputElement;
 const dialogSlot = $("dialog-slot");
+const attachStrip = $("attach-strip");
+const composerWrap = $("composer-wrap");
 const noticesEl = $("notices");
 const modelSelect = $("model-select") as HTMLSelectElement;
 const thinkingSelect = $("thinking-select") as HTMLSelectElement;
@@ -68,6 +77,9 @@ let pendingUi: PiEvent | null = null;
 let filter = "";
 let debounceT: number | null = null;
 let stickToBottom = true;
+let pendingImages: PendingImage[] = [];
+const MAX_IMAGES = 6;
+const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
 
 messagesEl.addEventListener("scroll", () => {
   const gap = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
@@ -216,15 +228,31 @@ function renderMessages() {
   scrollBottom();
 }
 
+function imgHtml(list: unknown): string {
+  if (!Array.isArray(list)) return "";
+  let out = "";
+  for (const raw of list) {
+    const b = raw as Record<string, unknown>;
+    const data = b.data ?? b.content;
+    const mime = b.mimeType ?? b.mime;
+    if (typeof data === "string" && typeof mime === "string" && data.length > 0 && mime.startsWith("image/")) {
+      out += `<img class="msg-img" alt="attached image" src="data:${esc(mime)};base64,${data}" />`;
+    }
+  }
+  return out;
+}
+
 function messageNode(m: AgentMessage): HTMLElement {
   const wrap = document.createElement("div");
-  const kind = m.role === "user" ? "user" : m.role === "bashExecution" ? "shell" : "assistant";
+  const kind =
+    m.role === "user" ? "user" : m.role === "bashExecution" ? "shell" : m.role === "toolResult" ? "tool" : "assistant";
   wrap.className = `msg ${kind}`;
   const avatar = m.role === "user" ? "Y" : m.role === "bashExecution" ? "$" : "π";
   const label = m.role === "user" ? "You" : m.role === "bashExecution" ? "Shell" : m.role === "toolResult" ? `Tool · ${String(m.toolName ?? "")}` : "pi";
   let inner = "";
   const text = msgText(m);
   if (text) inner += `<div class="md">${renderMarkdown(text.slice(0, 12000))}</div>`;
+  inner += imgHtml(m.content) + imgHtml(m.attachments);
   if (Array.isArray(m.content)) {
     const thoughts = (m.content as MsgContent[]).filter((c) => c.type === "thinking" && (c as { thinking: string }).thinking);
     if (thoughts.length > 0) {
@@ -252,6 +280,9 @@ function messageNode(m: AgentMessage): HTMLElement {
   });
   const tt = wrap.querySelector(".think-toggle");
   if (tt) tt.addEventListener("click", () => wrap.querySelector(".think-body")?.classList.toggle("open"));
+  wrap.querySelectorAll(".msg-img").forEach((img) => {
+    img.addEventListener("click", () => img.classList.toggle("full"));
+  });
   return wrap;
 }
 
@@ -364,27 +395,35 @@ async function refreshModels() {
 
 async function doSend() {
   const text = inputEl.value.trim();
-  if (!text) return;
+  const imgs = pendingImages.splice(0);
+  renderAttachments();
+  if (!text && imgs.length === 0) return;
+  const payload = { message: text, images: imgs.map((im) => ({ data: im.data, mimeType: im.mimeType })) };
   if (streaming) {
     // steer while running
     try {
-      await invoke("pi_steer", { message: text });
+      await invoke("pi_steer", payload);
       inputEl.value = "";
       autosize();
-      notice("Steered the running turn.");
+      notice(imgs.length > 0 ? "Steered the running turn (with image)." : "Steered the running turn.");
     } catch (e) {
+      pendingImages = [...imgs, ...pendingImages];
+      renderAttachments();
       notice(`steer failed: ${String(e)}`);
     }
     return;
   }
   // optimistic user bubble
-  messages = [...messages, { role: "user", content: text, timestamp: Date.now() }];
+  const content: MsgContent[] = [];
+  if (text) content.push({ type: "text", text });
+  for (const im of imgs) content.push({ type: "image", data: im.data, mimeType: im.mimeType });
+  messages = [...messages, { role: "user", content, timestamp: Date.now() }];
   renderMessages();
   inputEl.value = "";
   autosize();
   setBusy(true);
   try {
-    const r = (await invoke("pi_prompt", { message: text })) as { accepted: boolean; error?: string };
+    const r = (await invoke("pi_prompt", payload)) as { accepted: boolean; error?: string };
     if (!r.accepted) {
       setBusy(false);
       notice(`prompt rejected: ${r.error ?? "unknown"}`);
@@ -433,6 +472,7 @@ async function switchSession(path: string) {
 
 function setBusy(b: boolean) {
   streaming = b;
+  document.body.classList.toggle("working", b);
   sendBtn.textContent = b ? "■" : "↑";
   sendBtn.classList.toggle("stop", b);
   sendBtn.title = b ? "Stop (Esc)" : "Send (Enter)";
@@ -608,6 +648,81 @@ function autosize() {
 }
 inputEl.addEventListener("input", autosize);
 
+// ---------- image attachments: paste or drop onto the composer ----------
+function renderAttachments() {
+  attachStrip.innerHTML = "";
+  if (pendingImages.length === 0) {
+    attachStrip.classList.add("hidden");
+    return;
+  }
+  attachStrip.classList.remove("hidden");
+  pendingImages.forEach((im, i) => {
+    const el = document.createElement("div");
+    el.className = "attach-thumb";
+    el.innerHTML = `<img alt="pasted image ${i + 1}" /><button title="remove image">✕</button>`;
+    (el.querySelector("img") as HTMLImageElement).src = `data:${im.mimeType};base64,${im.data}`;
+    (el.querySelector("button") as HTMLButtonElement).onclick = () => {
+      pendingImages.splice(i, 1);
+      renderAttachments();
+    };
+    attachStrip.appendChild(el);
+  });
+}
+
+function addImageFiles(files: FileList | File[]) {
+  for (const f of Array.from(files)) {
+    if (!f.type.startsWith("image/")) continue;
+    if (pendingImages.length >= MAX_IMAGES) {
+      notice(`At most ${MAX_IMAGES} images per message.`);
+      break;
+    }
+    if (f.size > MAX_IMAGE_BYTES) {
+      notice(`Image too large (>${MAX_IMAGE_BYTES / 1024 / 1024}MB), skipped.`);
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const url = String(reader.result ?? "");
+      const comma = url.indexOf(",");
+      pendingImages.push({
+        data: comma >= 0 ? url.slice(comma + 1) : url,
+        mimeType: f.type || "image/png",
+        bytes: f.size,
+      });
+      renderAttachments();
+    };
+    reader.readAsDataURL(f);
+  }
+}
+
+inputEl.addEventListener("paste", (e) => {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+  const files: File[] = [];
+  for (const it of Array.from(items)) {
+    if (it.type.startsWith("image/")) {
+      const f = it.getAsFile();
+      if (f) files.push(f);
+    }
+  }
+  if (files.length > 0) addImageFiles(files);
+});
+
+composerWrap.addEventListener("dragover", (e) => {
+  if (Array.from(e.dataTransfer?.types ?? []).includes("Files")) {
+    e.preventDefault();
+    composerWrap.classList.add("drag");
+  }
+});
+composerWrap.addEventListener("dragleave", () => composerWrap.classList.remove("drag"));
+composerWrap.addEventListener("drop", (e) => {
+  composerWrap.classList.remove("drag");
+  if (e.dataTransfer?.files?.length) {
+    e.preventDefault();
+    addImageFiles(e.dataTransfer.files);
+  }
+});
+
 inputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -649,6 +764,29 @@ window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e)
   }
 });
 applyThemeLabel();
+
+// ---------- quiet mode: just pi's words ----------
+const quietBtn = $("btn-quiet") as HTMLButtonElement;
+function applyQuiet() {
+  const on = document.body.classList.contains("quiet");
+  quietBtn.textContent = on ? "quiet: on" : "quiet: off";
+}
+try {
+  if (localStorage.getItem("pi-quiet") === "1") document.body.classList.add("quiet");
+} catch {
+  /* storage unavailable — session-only */
+}
+applyQuiet();
+quietBtn.onclick = () => {
+  const on = document.body.classList.toggle("quiet");
+  try {
+    localStorage.setItem("pi-quiet", on ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
+  applyQuiet();
+  scrollBottom(true);
+};
 
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
 ($("btn-cwd") as HTMLButtonElement).onclick = () => openSettings();
