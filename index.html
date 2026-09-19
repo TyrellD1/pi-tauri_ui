@@ -20,78 +20,101 @@
   </head>
   <body>
     <div id="app">
-      <aside id="sidebar">
+      <aside id="sidebar" aria-label="Chats">
         <div class="side-top">
           <div class="brand">
-            <div class="brand-mark">π</div>
+            <div class="brand-mark" aria-hidden="true">π</div>
             <div class="brand-text">
               <div class="brand-name">pi</div>
-              <div class="brand-sub" id="cwd-label">…</div>
+              <button id="btn-cwd" class="folder-btn" type="button" title="">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2.5h8A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z"/></svg>
+                <span id="cwd-label">…</span>
+              </button>
             </div>
           </div>
-          <div class="side-actions">
-            <button id="btn-new" class="icon-btn" title="New chat (⌘N)">+</button>
-            <button id="btn-cwd" class="icon-btn" title="Change working directory">◦</button>
-          </div>
+        </div>
+        <div class="side-new">
+          <button id="btn-new" class="new-chat-btn" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            <span>New chat</span>
+          </button>
         </div>
         <div class="search-wrap">
-          <input id="search" placeholder="Search chats  ⌘K" autocomplete="off" spellcheck="false" />
+          <input id="search" placeholder="Search chats" autocomplete="off" spellcheck="false" aria-label="Search chats" />
+          <kbd class="search-hint" aria-hidden="true">⌘K</kbd>
         </div>
-        <div id="chat-list" class="chat-list"></div>
+        <div id="chat-list" class="chat-list" role="list" aria-label="Conversations"></div>
         <div class="side-foot">
-          <div id="conn-dot" class="conn"><span class="dot"></span><span id="conn-text">starting…</span></div>
-          <div class="side-foot-row">
-            <span id="ver-label">rpc · pi</span>
-            <button id="btn-settings" class="link-btn" title="Settings (⌘,)">settings</button>
-          </div>
+          <div id="conn-error" class="conn-error hidden" role="alert"></div>
+          <button id="btn-settings" class="settings-btn" type="button" title="Settings (⌘,)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.65 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h.09A1.7 1.7 0 0 0 10.14 3V3a2 2 0 1 1 4 0v.09c0 .68.4 1.3 1.04 1.56.6.25 1.3.1 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v.09c.25.6.88 1.04 1.56 1.04H21a2 2 0 1 1 0 4h-.09c-.68 0-1.3.4-1.51 1.04Z"/></svg>
+            <span>Settings</span>
+          </button>
         </div>
       </aside>
       <main id="main">
         <header id="chat-header">
           <div class="chat-title-wrap">
-            <div id="chat-title">New chat</div>
-            <div id="chat-meta">—</div>
+            <h1 id="chat-title">New chat</h1>
+            <div id="chat-sub" class="chat-sub hidden"></div>
           </div>
           <div class="header-actions">
-            <select id="model-select" title="Model"></select>
-            <select id="thinking-select" title="Thinking level">
-              <option value="off">think off</option>
-              <option value="minimal">minimal</option>
-              <option value="low">low</option>
-              <option value="medium" selected>medium</option>
-              <option value="high">high</option>
-              <option value="xhigh">xhigh</option>
-              <option value="max">max</option>
-            </select>
-            <button id="btn-stats" class="pill-btn" title="Session stats">stats</button>
-            <button id="btn-compact" class="pill-btn" title="Compact context">compact</button>
-            <button id="btn-export" class="pill-btn" title="Export HTML">export</button>
-            <button id="btn-quiet" class="pill-btn" title="Quiet mode: hide tool calls, thinking and results — just pi's words">quiet: off</button>
-            <button id="btn-theme" class="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme">
+            <button id="btn-menu" class="icon-action" type="button" aria-label="Conversation actions" aria-haspopup="menu" aria-expanded="false" title="Conversation actions">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>
+            </button>
+            <button id="btn-theme" class="icon-action" type="button" aria-label="Switch to dark theme" title="Switch to dark theme">
               <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
               <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
             </button>
           </div>
         </header>
-        <div id="workbar" aria-hidden="true"><div></div></div>
-        <div id="notices"></div>
-        <div id="messages" class="messages"><div id="messages-inner" class="messages-inner"></div></div>
+        <div id="notices" aria-live="polite"></div>
+        <div id="messages" class="messages" tabindex="-1"><div id="messages-inner" class="messages-inner"></div></div>
+        <button id="jump-latest" class="jump-latest hidden" type="button">Jump to latest ↓</button>
         <div id="composer-wrap">
           <div id="queue-bar" class="queue-bar hidden"></div>
           <div id="dialog-slot"></div>
           <div id="attach-strip" class="attach-strip hidden"></div>
+          <div id="attach-error" class="attach-error hidden" role="alert"></div>
           <div class="composer">
-            <textarea id="input" rows="1" placeholder="Message pi…  (Enter to send, Shift+Enter for newline, Esc to stop)"></textarea>
-            <button id="btn-send" class="send-btn" title="Send (Enter)">↑</button>
+            <textarea id="input" rows="1" placeholder="Message pi…" aria-label="Message pi"></textarea>
+            <button id="btn-queue" class="composer-btn secondary hidden" type="button" title="Send after this turn (follow-up)" aria-label="Queue as follow-up, sent after this turn">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+            </button>
+            <button id="btn-stop" class="composer-btn stop hidden" type="button" title="Stop (Esc)" aria-label="Stop the running turn">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+            </button>
+            <button id="btn-send" class="composer-btn primary" type="button" title="Send (Enter)" aria-label="Send message" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg>
+            </button>
+          </div>
+          <div class="composer-controls">
+            <label class="ctl">Model
+              <select id="model-select" aria-label="Model"></select>
+            </label>
+            <label class="ctl">Thinking
+              <select id="thinking-select" aria-label="Thinking level">
+                <option value="off">Off</option>
+                <option value="minimal">Minimal</option>
+                <option value="low">Low</option>
+                <option value="medium" selected>Medium</option>
+                <option value="high">High</option>
+                <option value="xhigh">xhigh</option>
+                <option value="max">max</option>
+              </select>
+            </label>
+            <span class="composer-hint" title="Enter sends · Shift+Enter adds a line · Esc stops">Enter sends · ⇧↵ newline · Esc stops</span>
           </div>
           <div class="composer-foot">
-            <span id="status-line">idle</span>
+            <span id="status-line" role="status">Ready</span>
+            <span id="ctx-warn" class="ctx-warn hidden"></span>
             <span id="token-line"></span>
           </div>
         </div>
       </main>
       <div id="modal-root"></div>
+      <div id="menu-root"></div>
     </div>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/entry.ts"></script>
   </body>
 </html>

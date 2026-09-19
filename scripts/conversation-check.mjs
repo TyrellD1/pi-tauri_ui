@@ -1,0 +1,34 @@
+import {execFileSync} from 'node:child_process';
+import {mkdtempSync,rmSync,readFileSync,readdirSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+import assert from 'node:assert/strict';
+const dir=mkdtempSync(join(tmpdir(),'pi-controller-'));
+try {
+  for(const name of ['conversation','logic']) execFileSync('node_modules/.bin/esbuild',[`src/${name}.ts`,'--bundle','--platform=node','--format=esm',`--outfile=${dir}/${name}.mjs`],{stdio:'pipe'});
+  const {Conversation}=await import(pathToFileURL(`${dir}/conversation.mjs`));
+  const {renderMarkdown,envelopeError}=await import(pathToFileURL(`${dir}/logic.mjs`));
+  const c=new Conversation();let count=0;
+  const check=(name,fn)=>{fn();console.log(`ok - ${name}`);count++;};
+  const event=(type,contentIndex,fields)=>c.ingest({type:'message_update',assistantMessageEvent:{type,contentIndex,...fields}});
+  c.ingest({type:'message_start',message:{role:'assistant',content:[]}});
+  event('text_delta',0,{delta:'Before'});
+  event('toolcall_start',1,{id:'a',toolName:'read'});event('toolcall_start',2,{id:'b',toolName:'write'});
+  event('toolcall_delta',1,{delta:'{"path":"a.ts"}'});event('toolcall_delta',2,{delta:'{"path":"b.ts"}'});
+  check('interleaved arguments correlate by content index',()=>{assert.equal(c.messages[0].content[1].arguments.path,'a.ts');assert.equal(c.messages[0].content[2].arguments.path,'b.ts');});
+  c.ingest({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'Corrected final text'},{type:'toolCall',id:'a',name:'read',arguments:{path:'final.ts'}}]}});
+  check('message_end replaces partial content authoritatively',()=>{assert.equal(c.messages[0].content[0].text,'Corrected final text');assert.equal(c.messages[0].content.length,2);});
+  c.ingest({type:'message_start',message:{role:'user',content:'steer'}});c.ingest({type:'message_end',message:{role:'user',content:'steer'}});
+  c.ingest({type:'message_start',message:{role:'assistant',content:[]}});event('text_delta',0,{delta:'After'});
+  check('new assistant content index zero starts a new message',()=>{assert.equal(c.messages.length,3);assert.equal(c.messages[2].content[0].text,'After');});
+  c.ingest({type:'tool_execution_end',toolCallId:'a',isError:true,result:{content:[{type:'text',text:'denied'}]}});
+  check('tool errors retained by call id',()=>{assert.deepEqual(c.tools.get('a'),{output:'denied',isError:true,state:'failed'});});
+  check('negative RPC envelopes propagate error',()=>assert.equal(envelopeError({success:false,error:'rejected'}),'rejected'));
+  check('markdown HTML and link attributes are escaped',()=>{const html=renderMarkdown('<img src=x onerror=alert(1)>\n\n[x](https://example.com/"onclick="alert(1))');assert(!html.includes('<img'));assert(!html.includes('"onclick="'));assert(html.includes('&quot;'));});
+  check('table cells escape exactly once and preserve inline code pipes',()=>{const html=renderMarkdown('| A | B |\n| --- | --- |\n| <x> & y | `a|b` |');assert(html.includes('&lt;x&gt; &amp; y'));assert(!html.includes('&amp;lt;'));assert(html.includes('<code>a|b</code>'));});
+  check('fenced markup remains literal',()=>{const html=renderMarkdown('```html\n<a href="x">**literal**</a>\n```');assert(!html.includes('<strong>'));assert(html.includes('&lt;a'));});
+  const prod=readdirSync('dist/assets').filter(n=>n.endsWith('.js')).map(n=>readFileSync(`dist/assets/${n}`,'utf8')).join('\n');
+  check('production bundles exclude preview fixtures',()=>{assert(!prod.includes('Preview scenarios'));assert(!prod.includes('Preview rejection'));assert(!prod.includes('Run UI regression'));});
+  console.log(`${count} controller and production checks passed.`);
+} finally {rmSync(dir,{recursive:true,force:true});}

@@ -8,8 +8,9 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, atomic::{AtomicU64, Ordering}},
+    time::UNIX_EPOCH,
+    io::BufRead,
 };
 
 use serde_json::Value;
@@ -29,7 +30,7 @@ struct PiInner {
 struct PiManager {
     inner: Mutex<PiInner>,
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
-    app: Mutex<Option<AppHandle>>,
+    generation: AtomicU64,
 }
 
 impl PiManager {
@@ -40,22 +41,18 @@ impl PiManager {
         Self {
             inner: Mutex::new(PiInner { child: None, stdin: None, cwd }),
             pending: Mutex::new(HashMap::new()),
-            app: Mutex::new(None),
+            generation: AtomicU64::new(0),
         }
     }
 }
 
 // ---------- helpers ----------
 
-fn session_slug(cwd: &str) -> String {
-    let mid = cwd.replace('/', "-");
-    let mid = mid.trim_matches('-');
-    format!("--{}--", mid)
-}
-
-fn sessions_dir_for(cwd: &str) -> Option<PathBuf> {
-    let home = dirs::home_dir()?;
-    Some(home.join(".pi").join("agent").join("sessions").join(session_slug(cwd)))
+fn checked_response(v: Value) -> Result<Value, String> {
+    if v.get("success").and_then(Value::as_bool) == Some(false) {
+        return Err(v.get("error").and_then(Value::as_str).unwrap_or("pi rejected the request").to_string());
+    }
+    Ok(v)
 }
 
 async fn write_line(state: &State<'_, Arc<PiManager>>, line: &str) -> Result<(), String> {
@@ -85,7 +82,7 @@ async fn request(state: &State<'_, Arc<PiManager>>, mut cmd: Value) -> Result<Va
         return Err(e);
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
-        Ok(Ok(v)) => Ok(v),
+        Ok(Ok(v)) => checked_response(v),
         Ok(Err(_)) => Err("request cancelled".to_string()),
         Err(_) => {
             state.pending.lock().await.remove(&id);
@@ -118,7 +115,7 @@ async fn fire(state: &State<'_, Arc<PiManager>>, cmd: Value) -> Result<(), Strin
     write_line(state, &line).await
 }
 
-fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::process::ChildStdout) {
+fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::process::ChildStdout, generation: u64) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(&mut stdout);
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -127,6 +124,7 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
             match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) => break, // EOF
                 Ok(_) => {
+                    if state.generation.load(Ordering::SeqCst) != generation { return; }
                     // strip trailing \n and optional \r — nothing else
                     while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
                         buf.pop();
@@ -134,8 +132,7 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
                     if buf.is_empty() {
                         continue;
                     }
-                    let line = String::from_utf8_lossy(&buf).to_string();
-                    let v: Value = match serde_json::from_str(&line) {
+                    let v: Value = match serde_json::from_slice(&buf) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
@@ -153,6 +150,10 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
                 }
                 Err(_) => break,
             }
+        }
+        if state.generation.load(Ordering::SeqCst) == generation {
+            state.pending.lock().await.clear();
+            let _ = app.emit("pi-event", serde_json::json!({"type": "process_disconnected"}));
         }
     });
 }
@@ -180,6 +181,8 @@ async fn pi_spawn(cwd: Option<String>, app: AppHandle, state: State<'_, Arc<PiMa
     }
     {
         let mut inner = state.inner.lock().await;
+        let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        state.pending.lock().await.clear();
         kill_child(&mut inner).await;
         let mut child = Command::new("pi")
             .arg("--mode")
@@ -187,7 +190,8 @@ async fn pi_spawn(cwd: Option<String>, app: AppHandle, state: State<'_, Arc<PiMa
             .current_dir(&target)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("failed to spawn `pi --mode rpc`: {} (is pi on PATH?)", e))?;
         let stdin = child.stdin.take().ok_or("no stdin")?;
@@ -197,14 +201,8 @@ async fn pi_spawn(cwd: Option<String>, app: AppHandle, state: State<'_, Arc<PiMa
         inner.cwd = target.clone();
         drop(inner);
         let mgr = state.inner();
-        spawn_reader(app.clone(), mgr.clone(), stdout);
+        spawn_reader(app.clone(), mgr.clone(), stdout, generation);
     }
-    {
-        let mut a = state.app.lock().await;
-        *a = Some(app);
-    }
-    // give pi a beat, then best-effort get_state (ignore errors)
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     Ok(serde_json::json!({ "ok": true, "cwd": target }))
 }
 
@@ -213,16 +211,8 @@ async fn pi_prompt(message: String, images: Option<Vec<Value>>, state: State<'_,
     // fire-and-accept: response only means accepted/queued, events stream after
     let mut cmd = serde_json::json!({ "type": "prompt", "message": message });
     attach_images(&mut cmd, images);
-    match request(&state, cmd).await {
-        Ok(r) => {
-            if r.get("success").and_then(|s| s.as_bool()) == Some(true) {
-                Ok(serde_json::json!({ "accepted": true }))
-            } else {
-                Ok(serde_json::json!({ "accepted": false, "error": r.get("error").and_then(|e| e.as_str()).unwrap_or("rejected") }))
-            }
-        }
-        Err(e) => Ok(serde_json::json!({ "accepted": false, "error": e })),
-    }
+    request(&state, cmd).await?;
+    Ok(serde_json::json!({ "accepted": true }))
 }
 
 #[tauri::command]
@@ -234,9 +224,25 @@ async fn pi_steer(message: String, images: Option<Vec<Value>>, state: State<'_, 
 }
 
 #[tauri::command]
+async fn pi_follow_up(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+    // exact RPC `follow_up`: queued, delivered only when the agent finishes
+    let mut cmd = serde_json::json!({ "type": "follow_up", "message": message });
+    attach_images(&mut cmd, images);
+    let r = request(&state, cmd).await?;
+    Ok(r)
+}
+
+#[tauri::command]
+async fn pi_clear_queue(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+    // explicit user action only — Esc/Stop must not silently clear queued items
+    let r = request(&state, serde_json::json!({ "type": "clear_queue" })).await?;
+    Ok(r)
+}
+
+#[tauri::command]
 async fn pi_abort(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    // clear queue first (Esc semantics), then abort
-    let _ = request(&state, serde_json::json!({ "type": "clear_queue" })).await;
+    // Stop only. Queued steering/follow-up messages are preserved (abort
+    // continues them when they remain); the UI offers an explicit Clear.
     let r = request(&state, serde_json::json!({ "type": "abort" })).await?;
     Ok(r)
 }
@@ -350,103 +356,72 @@ async fn pi_ui_response(id: String, payload: Value, state: State<'_, Arc<PiManag
 
 #[tauri::command]
 async fn pi_list_sessions(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let cwd = state.inner.lock().await.cwd.clone();
-    let active: Option<String> = match request(&state, serde_json::json!({ "type": "get_state" })).await {
-        Ok(r) => r.pointer("/data/sessionFile").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        Err(_) => None,
-    };
-    let dir = sessions_dir_for(&cwd);
-    let mut out: Vec<Value> = Vec::new();
-    if let Some(d) = dir {
-        if let Ok(entries) = std::fs::read_dir(&d) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                let mtime = e
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                // light parse: first user text + count
-                let (preview, count) = parse_session_preview(&p);
-                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("session").to_string();
-                // id = uuid suffix after last '_' if present
-                let id = stem.rsplit('_').next().unwrap_or(&stem).to_string();
-                out.push(serde_json::json!({
-                    "path": p.to_string_lossy(),
-                    "id": id,
-                    "name": null,
-                    "preview": preview,
-                    "mtime": mtime,
-                    "messageCount": count,
-                }));
-            }
-        }
-    }
-    out.sort_by(|a, b| {
-        let am = a.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
-        let bm = b.get("mtime").and_then(|v| v.as_u64()).unwrap_or(0);
-        bm.cmp(&am)
-    });
-    // cap for perf: newest 200
-    out.truncate(200);
-    // enrich name if active session has a name
-    Ok(serde_json::json!({ "sessions": out, "active": active }))
+    let r = request(&state, serde_json::json!({ "type": "get_state" })).await?;
+    let active = r.pointer("/data/sessionFile").and_then(Value::as_str).map(String::from);
+    // Respect the harness' actual session directory, including custom settings.
+    let dir = active.as_ref().and_then(|p| PathBuf::from(p).parent().map(|p| p.to_path_buf()));
+    let out = tokio::task::spawn_blocking(move || list_sessions(dir)).await.map_err(|e| e.to_string())??;
+    Ok(serde_json::json!({"sessions": out, "active": active}))
 }
 
-fn parse_session_preview(path: &PathBuf) -> (String, usize) {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return ("".to_string(), 0);
+fn list_sessions(dir: Option<PathBuf>) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    let Some(dir) = dir else { return Ok(out); };
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Err(e) => return Err(format!("Couldn't read chats: {}", e)),
     };
-    let mut preview = String::new();
-    let mut count = 0;
-    for line in content.lines().take(400) {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("message") {
-            continue;
-        }
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("jsonl") { continue; }
+        let mtime = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let (preview, name, count) = parse_session_preview(&p);
+        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("session");
+        out.push(serde_json::json!({"path": p.to_string_lossy(), "id": stem, "name": name, "preview": preview, "mtime": mtime, "messageCount": count}));
+    }
+    out.sort_by_key(|v| std::cmp::Reverse(v["mtime"].as_u64().unwrap_or(0)));
+    Ok(out)
+}
+
+fn parse_session_preview(path: &PathBuf) -> (String, Option<String>, usize) {
+    let Ok(file) = std::fs::File::open(path) else { return ("Unreadable session".into(), None, 0); };
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let mut preview = String::new(); let mut name = None; let mut count = 0;
+    // Read one record at a time instead of retaining entire histories in memory.
+    while { line.clear(); reader.read_line(&mut line).unwrap_or(0) > 0 } {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue; };
+        if v["type"] == "session_info" { name = v["name"].as_str().map(String::from); }
+        if v["type"] != "message" { continue; }
         count += 1;
-        if preview.is_empty() {
-            if let Some(msg) = v.get("message") {
-                if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
-                    if let Some(c) = msg.get("content") {
-                        if let Some(s) = c.as_str() {
-                            preview = s.chars().take(120).collect();
-                        } else if let Some(arr) = c.as_array() {
-                            for b in arr {
-                                if let Some(t) = b.get("text").and_then(|x| x.as_str()) {
-                                    preview = t.chars().take(120).collect();
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        if preview.is_empty() && v["message"]["role"] == "user" {
+            let c = &v["message"]["content"];
+            let text = c.as_str().or_else(|| c.as_array().and_then(|a| a.iter().find_map(|b| b["text"].as_str())));
+            preview = text.unwrap_or("Image attachment").chars().take(120).collect();
         }
     }
-    // fallback: file mtime label
-    if preview.is_empty() {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if let Ok(mt) = meta.modified() {
-                if let Ok(d) = mt.duration_since(UNIX_EPOCH) {
-                    let _ = d;
-                }
-            }
-        }
-        preview = "Untitled session".to_string();
+    if preview.is_empty() { preview = "Untitled session".into(); }
+    (preview, name, count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejection_is_an_error() {
+        assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
+        assert!(checked_response(serde_json::json!({"success":true})).is_ok());
     }
-    // also count remaining lines cheaply
-    let total_lines = content.lines().count();
-    let _ = SystemTime::now();
-    let _ = UNIX_EPOCH;
-    (preview, count.max(total_lines.min(9999)))
+    #[test]
+    fn all_sessions_remain_available_and_names_are_read() {
+        let dir = std::env::temp_dir().join(format!("pi-ui-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        for i in 0..205 { std::fs::write(dir.join(format!("{}.jsonl",i)), "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n{\"type\":\"session_info\",\"name\":\"Renamed\"}\n").unwrap(); }
+        let sessions = list_sessions(Some(dir.clone())).unwrap();
+        assert_eq!(sessions.len(),205); assert_eq!(sessions[0]["name"], "Renamed"); assert_eq!(sessions[0]["messageCount"],1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 fn main() {
@@ -458,6 +433,8 @@ fn main() {
             pi_spawn,
             pi_prompt,
             pi_steer,
+            pi_follow_up,
+            pi_clear_queue,
             pi_abort,
             pi_new_session,
             pi_switch_session,

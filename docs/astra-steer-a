@@ -1,0 +1,138 @@
+# Astra steer A: cleaner, sharper pi UI
+
+## Intent and scope
+
+Make pi feel like a precise, quiet desktop conversation tool. The conversation and composer should dominate; navigation should be easy to scan; occasional controls should recede. Achieve sharpness through alignment, readable type, consistent spacing, and fewer competing surfaces.
+
+This is the UI/UX brief for the implementing agent. Keep the current Tauri + vanilla TypeScript architecture and exact pi RPC behavior. Follow AGENTS.md, including its grayscale tokens, system fonts, theme behavior, and resource limits. Preserve existing capabilities while improving their placement and presentation. Coordinate with concurrent work before editing shared files.
+
+Basis: reviewed `index.html`, `src/style.css`, `src/main.ts`, README, AGENTS.md, and the browser-rendered shell on 2026-09-19. The browser shell lacks the native Tauri connection; populated conversations and RPC interactions were reviewed in source, not verified live. Recheck the current files because another agent is actively changing them.
+
+## Highest-impact changes
+
+1. Simplify the header to the conversation title, a conversation menu, and the required theme toggle. Put model and thinking controls beside the composer.
+2. Render assistant prose directly on the conversation canvas. Remove the repeated bordered assistant bubbles, avatars, and uppercase role labels.
+3. Increase conversation text to 15px, establish a shared content axis, and add deliberate space between turns.
+4. Collapse routine tool activity into compact disclosures, with each call and its output shown together once.
+5. Give sending, steering, stopping, and waiting for input clear, consistent behavior.
+
+These are the first implementation pass. Fine polish follows after the hierarchy works with real conversation content.
+
+## 1. Shell and hierarchy
+
+Use three stable regions: a quiet sidebar, a single-row conversation header, and a conversation column ending in a pinned composer.
+
+| Element | Target |
+| --- | --- |
+| Sidebar | 240px wide at the normal desktop size; 224px near the minimum window width |
+| Header | 56px high, 20px horizontal padding, one bottom separator |
+| Conversation/composer | Shared centered outer column, maximum 800px, at least 24px side gutters where space allows |
+| Assistant prose | Approximately 65–75 characters per line; code and tables may use the full column |
+| Conversation spacing | 24–32px between turns; 12px between related blocks; 6–8px for metadata |
+| Composer | 12px radius; 16–20px clearance from the window bottom |
+| Controls | 32px default height; 16px inline SVG icons; 8px corner radius |
+
+Treat these as starting dimensions, then verify them visually in the actual app. Align assistant text, activity disclosures, and the composer's text inset to a common left edge. Avoid several almost-aligned containers with independent padding.
+
+The app currently declares a minimum window of 860×560 and a default of 1180×760. Both must work without clipping, squeezed labels, header wrapping, or page-level horizontal scrolling. Let the title truncate before actions overlap. Wide code scrolls inside its block. Keep native window controls and drag behavior usable.
+
+## 2. Header and sidebar
+
+**Header:** title on the left; conversation menu and sun/moon toggle on the right. Omit empty metadata such as the current dash. Keep a secondary line only when it conveys useful information absent elsewhere. Remove the permanent `stats`, `compact`, `export`, and `quiet: off` pill row.
+
+The conversation menu contains `Session details`, `Compact context`, `Export conversation`, `Rename chat`, and a checkable `Show tool activity` setting. Keep all existing capabilities discoverable here; do not silently remove them. Preserve the existing quiet-mode preference when moving its control. Use a standard keyboard-operable menu with focus restoration and Escape dismissal.
+
+**Sidebar:** show one small pi identity and a clearly clickable project/folder name. Replace the unexplained `◦` working-directory button with an identifiable folder affordance. Display the folder basename; expose the full path through a tooltip or project control. Never invent a project path.
+
+Make `New chat` a plainly labeled action. Keep search quiet, with a separate shortcut hint rather than packing instructions into its placeholder. Conversation rows should have a 13px title, one optional preview, and a subdued relative date in the system font. Use regular weight for ordinary titles and medium weight for the selected one. Selection should be a subtle surface fill, with no extra border needed. Rows must be actual keyboard-operable controls with a programmatically exposed current selection.
+
+Keep Settings at the bottom. Remove always-visible `rpc · pi` branding and redundant connected/idle readouts. Show connection problems prominently when they need action. Distinguish `No chats yet` from `No chats match “…”`; provide `New chat` or `Clear search` respectively. Retain the 150ms search debounce and window lists above 200 items.
+
+## 3. Conversation presentation
+
+Assistant messages should be open text on `--page`, with no surrounding card, repeated pi avatar, or uppercase monospace `PI` label. A streaming response must use the same typography and geometry as the settled response. Group contiguous assistant content within a turn while preserving event order and meaningful boundaries.
+
+User messages may retain a restrained right-aligned `--surface` fill with 10–12px radius and 12–14px padding. Remove the `Y` avatar and redundant `YOU` label. Cap short user messages around 80% of the column, allowing long or structured content enough room to read. Preserve accessible identification of message authors.
+
+Use 15px conversation text with roughly 1.6 line height; 13px controls/sidebar text; 12px secondary text. Use weight 400 for body text and 500–600 for emphasis. Give Markdown headings a real hierarchy, approximately 20/18/16px, with space above them. The current identical heading sizes flatten the response. Keep monospace exclusively for code and actual tool output, not timestamps, role labels, status, or statistics.
+
+Code blocks get one surface, a quiet language/copy row, and readable 12–13px code. Avoid a bordered code card inside a bordered message card. Preserve horizontal scrolling locally. Message Copy appears on hover **and keyboard focus**, with a stable hit area; only show `Copied` after clipboard success.
+
+Do not silently cut assistant text at 12,000 characters or tool output at 4,000 characters. Keep full message content available. For tool output, show at most 200 lines initially with `Show full output` and a visible truncation indication. Copy must have a clear meaning and must not accidentally copy a visually truncated fragment as if it were the whole answer.
+
+## 4. Tool activity and thinking
+
+Default presentation: collapsed, single-row disclosures such as `Read · src/main.ts` or `Run command · npm run build`, with a chevron and a concise state. Use real tool names/arguments to derive summaries; retain raw arguments in details and fall back honestly when a friendly summary is unavailable.
+
+Associate output with its tool call by ID. Show it once inside that disclosure. The current `messageNode()` path renders tool-result text as Markdown and again in an open tool card; eliminate that duplication and the separate chat-bubble treatment. Preserve the sequence of calls and prose.
+
+Use an actual button with `aria-expanded` for each disclosure. Keep expansion, focus, text selection, and local output scrolling stable while new events arrive. Thinking stays collapsed with a simple `Thinking` label; remove character counts and dashed boxes. A failed tool remains visibly marked and its explanation accessible, including when routine tool activity is hidden. Permission requests and actionable failures must never disappear with quiet mode.
+
+Use one primary activity status near the composer: `Thinking…`, `Running command…`, `Waiting for your input`, or `Stopping…`, driven by actual events. Remove the combination of sliding workbar, pulsing connection dot, pulsing tool dots, streaming label, and duplicate footer status. A single subtle streaming caret is enough motion. Reserve its space and stop animation on settle; no perpetual animation at idle.
+
+## 5. Composer and interaction contract
+
+Use a clean `Message pi…` placeholder. Move keyboard instruction text into a restrained helper or tooltip. The composer should have a quiet default border and a clear focus treatment. Keep it pinned while only the conversation scrolls; grow input up to the existing 160px limit, then scroll inside it.
+
+Place model and thinking controls in a compact row within the composer. Show the selected model and an understandable label such as `Thinking: Medium`. Bound long model names, expose the full value on focus/hover, and avoid an empty unlabeled select during startup. Keep native select behavior unless an accessible replacement is actually needed. Full token/cost details belong in Session details; only show a compact context warning near the composer when it helps the user act.
+
+**Required behavior:**
+
+| State/action | Behavior |
+| --- | --- |
+| Idle, empty draft | Send disabled; attachment-only drafts remain sendable if supported |
+| Idle, valid draft, Enter or Send | Optimistic user message immediately; no duplicate message on acknowledgement |
+| Running, valid draft, Enter or Send | Send a steering message through the supported RPC path; keep Stop separately available |
+| Running, empty draft, Enter | No action; it must not abort the turn |
+| Running, Stop or Escape outside a transient UI | Request abort; display `Stopping…` until the actual settled event |
+| Shift+Enter | Insert a newline; never send |
+| Text composition in progress | Enter confirms composition; never sends or stops accidentally |
+| Active menu/dialog, Escape | Dismiss/cancel that surface only; do not also abort the agent |
+
+The current input handler sends Enter to `doAbort()` while streaming, even though `doSend()` contains a steering branch. Resolve this conflict explicitly. Give Send an accurate accessible name such as `Send steering message` while running. Provide `Send after this turn` as a secondary composer action using the actual `follow_up` RPC semantics; verify the backend command before wiring it. Keep the default action obvious without adding a permanent row of mode pills.
+
+Queued items must show whether they are steering or follow-up messages and have an explicit supported clear action. Do not advertise `Esc clears` while Escape actually stops the agent. Preserve draft text and attachments on send failure and across temporary dialogs. Keep failed optimistic messages identifiable and retryable without duplication.
+
+Preserve paste/drop attachments and removal controls. Keep previews compact and reserve image dimensions to prevent jumping. Expose attachment validation errors beside the composer.
+
+When the user scrolls up, stop following incoming output and offer `Jump to latest`. New chunks must not pull the viewport away from what they are reading. Updates must preserve expanded disclosures and selected text. In particular, stop replacing all of `messagesInner` for each streaming refresh; update the active content and keep settled nodes stable.
+
+## 6. Empty, loading, error, and permission states
+
+Empty conversation: a modest `What would you like to work on?`, one line identifying the current folder, and at most two useful text actions such as `Explain this project` and `Review recent changes`. Clicking a suggestion fills the composer for editing. Remove `Full RPC harness`, `Grayscale by design`, and similar implementation/appearance commentary from the product UI.
+
+Startup and session loading need stable, restrained placeholders. Do not leave a blank pane or permanent `starting…` status on initialization failure. Put initialization/listener errors into a recoverable visible state. Show a short explanation and an appropriate Retry action, with technical details expandable. Keep actionable errors present until resolved or dismissed; the current six-second notice timeout is unsuitable for them.
+
+Extension requests remain anchored above the composer, with the requested action, relevant path/command/context, and distinct confirm/reject/cancel behavior matching the protocol. They must work with tools hidden. Use visible labels, correct input values, keyboard navigation, and a clear waiting state. Avoid silent approval or disappearance on response failure; keep an explicit failed/pending state and safe recovery.
+
+Settings should label the working directory as `Project folder` and explain `Changing folders restarts pi and shows that folder’s chats.` Preserve drafts through that transition. Put session renaming with conversation actions. Dialogs need an accessible name, appropriate initial focus, trapped focus when modal, and focus restoration when closed.
+
+## 7. Visual consistency and resource constraints
+
+Use the existing light/dark theme variables everywhere, including generated markup, empty states, tool summaries, notices, and dialogs. Remove remaining hard-coded inline colors in `main.ts`. Keep the single icon-only sun/moon toggle in the header, OS following until overridden, `pi-theme` persistence, and pre-paint application. Both themes are first-class.
+
+Prefer borderless secondary controls with a subtle hover surface. Reserve strong fill for the immediate primary action. Use one consistent inline SVG stroke style instead of text glyphs for plus, folder, send, stop, close, and disclosure controls. Keep controls understandable through accessible names and tooltips. Preserve visible keyboard focus; do not rely on hover or barely visible gray text to communicate interactivity.
+
+Keep shadows for floating menus/dialogs, radii within the established 8–12px range, and backgrounds flat. Add no accent palette, decorative illustrations, font downloads, blur effects, animation library, or frontend framework. Respect reduced motion for every transition and animation. Use event-driven updates, no polling, and the existing bundle/resource budgets.
+
+## Delivery order and acceptance
+
+Implement in small working increments:
+
+1. Header/sidebar simplification, shared column geometry, typography, and open assistant messages.
+2. Unified tool disclosures, composer controls, Send/Stop contract, and stable streaming updates.
+3. Failure/loading/permission states, keyboard behavior, theme consistency, and final visual alignment.
+
+Before calling this done, verify the following in the native app and capture representative screenshots:
+
+- [ ] At 1180×760 and 860×560, in both light and dark themes, the header stays on one row and the composer stays reachable.
+- [ ] A realistic conversation with short and long answers, headings, lists, code, attachments, and tool calls feels readable without nested bordered message containers.
+- [ ] Each tool result appears once; thinking starts collapsed; failures and permission requests remain visible with tool activity hidden.
+- [ ] Enter sends/steers as labeled; Stop and Escape stop as specified; Shift+Enter and text composition behave correctly; queued follow-ups are distinguishable.
+- [ ] Streaming does not reset scroll position, selection, open details, or keyboard focus; `Jump to latest` works.
+- [ ] Keyboard users can reach chats, search, every menu/control, copy actions, and dialogs; Cmd+N, Cmd+K, Cmd+, still work.
+- [ ] Startup failure, rejected send, session loading, no search results, and permission-response failure all have useful explanations and recovery.
+- [ ] Long content remains available; 200+ chats and large tool output remain responsive; no new idle polling or continuous animation.
+- [ ] `npm run build` and `npm run tauri build` pass. Use focused regression coverage for changed send/stop/queue and streaming behavior; report any native checks that could not be performed.
+
+Review the populated conversation first. It is the primary product surface and the clearest measure of whether this pass made pi cleaner and sharper.
