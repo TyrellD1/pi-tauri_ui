@@ -686,10 +686,7 @@ async function openChat(project: string, path: string) {
     notify({ text: "Answer the pending request before changing chats or folders." });
     return;
   }
-  if (streaming) {
-    notify({ text: "Stop the running turn before changing chats or folders." });
-    return;
-  }
+  if (streaming) await stopRunForSwitch();
   saveDraft();
   await setCwd(project);
   if (cwd !== project) return;
@@ -719,13 +716,21 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   time.className = "ci-time";
   time.textContent = fmtRelative(s.mtime);
   row.appendChild(t);
+  if (runningSet.has(`${project}:${s.path}`)) {
+    const dot = document.createElement("span");
+    dot.className = "run-dot";
+    dot.title = "Running";
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", `${s.name || s.preview.slice(0, 60) || "Untitled"} is running`);
+    row.appendChild(dot);
+  }
   row.appendChild(time);
   const sub = document.createElement("div");
   sub.className = "ci-sub";
   sub.textContent = s.preview.slice(0, 80);
   el.appendChild(row);
   if (s.name && s.preview && s.preview !== s.name) el.appendChild(sub);
-  el.disabled = navigating || booting || streaming;
+  el.disabled = navigating || booting;
   el.onclick = () => openChat(project, s.path);
   return el;
 }
@@ -1229,8 +1234,8 @@ function updateSendState() {
   stopBtn.disabled = stopping || !conn;
   modelSelect.disabled = !conn || streaming; thinkingSelect.disabled = !conn || streaming;
   inputEl.disabled = navigating;
-  $("btn-new").toggleAttribute("disabled", !conn || streaming);
-  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn || streaming);
+  $("btn-new").toggleAttribute("disabled", !conn);
+  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn);
   sendBtn.disabled = !ok || !conn || sendInFlight !== null;
   if (!streaming) {
     sendBtn.setAttribute("aria-label", "Send message");
@@ -1248,6 +1253,12 @@ function updateSendState() {
   renderStatus();
 }
 
+// Session key that owns the live run. Kept until its settle arrives, even if
+// the user has switched away (pi aborts the turn on switch; its leftover
+// events must never render into the visible chat). runningSet drives the
+// pulsing blue dots in the sidebar.
+let streamOwner: string | null = null;
+const runningSet = new Set<string>();
 function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
 function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
@@ -1400,7 +1411,7 @@ async function retrySend(f: FailedSend) {
 async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
   const owner = sessKey(), gen = bootGen, id = newClientId(), startIndex = messages.length;
   sendInFlight = id;
-  if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; setBusy(true); renderSettled(); }
+  if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; streamOwner = owner; setBusy(true); renderSettled(); }
   updateSendState();
   try {
     const r = await invokeChecked<{accepted?: boolean; error?: string}>(`pi_${kind}`, { message: d.text, images: d.images.map(im => ({ data: im.data, mimeType: im.mimeType })) });
@@ -1436,6 +1447,20 @@ async function doSend() { if (!canSubmit()) return; await submit(takeDraft(), st
 async function doSteer() { if (!canSubmit()) return; await submit(takeDraft(), streaming ? "steer" : "prompt"); }
 async function doFollowUp() { if (!canSubmit()) return; await submit(takeDraft(), streaming ? "follow_up" : "prompt"); }
 
+// Switching chats while a turn runs: pi aborts the turn on session switch
+// anyway (verified: stop=aborted), so stop it explicitly first and navigate
+// immediately. The run's settle arrives as a foreign event and only touches
+// the sidebar. No confirm modal — switching must feel instant.
+async function stopRunForSwitch() {
+  if (!streaming) return;
+  stopping = true; updateSendState();
+  try { await invokeChecked("pi_abort"); } catch { /* the settle still arrives; keep moving */ }
+  if (pendingSend && pendingSend.owner === streamOwner) pendingSend = null;
+  queue = { steering: [], followUp: [] }; renderQueue();
+  // NOTE: streamOwner is intentionally kept until the foreign settle lands.
+  setBusy(false); stopping = false; updateSendState();
+  notify({ text: "Stopped the running turn to switch chats." });
+}
 async function doAbort() {
   if (!streaming || stopping) return;
   stopping = true;
@@ -1490,7 +1515,7 @@ function renderQueue() {
 async function navigate(command: string, args?: Record<string, unknown>) {
   if (navigating || booting || sendInFlight) return;
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
-  if (streaming) { notify({ text: "Stop the running turn before changing chats or folders." }); return; }
+  if (streaming) await stopRunForSwitch();
   navigating = true; saveDraft(); ++bootGen; updateSendState();
   let changed = false;
   try {
@@ -1711,7 +1736,7 @@ async function respondUi(id: string, payload: Record<string, unknown>) {
 async function handleEvent(p: PiEvent) {
   const t = p.type;
   if (t === "process_disconnected") {
-    ++bootGen; booting = false; setBusy(false); bootError = "pi disconnected. Reconnect to continue; your draft is kept.";
+    ++bootGen; booting = false; setBusy(false); streamOwner = null; runningSet.clear(); bootError = "pi disconnected. Reconnect to continue; your draft is kept.";
     saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
     showConnError("pi disconnected", () => boot(true)); return;
   }
@@ -1719,7 +1744,20 @@ async function handleEvent(p: PiEvent) {
   if (t === "queue_update") {
     queue = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] }; renderQueue(); return;
   }
-  if (t === "agent_start") { setBusy(true); streamActivity = "thinking"; }
+  const foreign = streamOwner !== null && streamOwner !== sessKey();
+  if (foreign) {
+    // Leftover events from a run we switched away from. Never render these
+    // into the visible chat; only track the sidebar dot and refresh lists.
+    if (t === "agent_start") { runningSet.add(streamOwner!); renderProjects(); return; }
+    if (t === "agent_settled") {
+      runningSet.delete(streamOwner!); streamOwner = null;
+      setBusy(false);
+      if (pendingSend && pendingSend.owner !== sessKey()) pendingSend = null;
+      await refreshAllProjects();
+    }
+    return;
+  }
+  if (t === "agent_start") { setBusy(true); streamActivity = "thinking"; runningSet.add(streamOwner ?? sessKey()); renderProjects(); }
   if (t.startsWith("message_") || t.startsWith("tool_execution_")) {
     ++revision; conversation.ingest(p); messages = conversation.messages; reconcileSend();
     chatTitle.textContent = activeName || deriveTitle() || "New chat";
@@ -1729,6 +1767,8 @@ async function handleEvent(p: PiEvent) {
     renderStatus(); queueStreamUpdate();
   }
   if (t === "agent_settled") {
+    if (streamOwner) runningSet.delete(streamOwner);
+    streamOwner = null;
     setBusy(false); pendingSend = null; renderSettled();
     // Keep live content visible while authoritative history is fetched.
     await refreshMessages(); await refreshAllProjects(); await refreshStats();

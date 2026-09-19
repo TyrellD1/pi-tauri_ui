@@ -151,6 +151,9 @@ h1 { margin: 0; }
 }
 .chat-item[aria-current="true"] .ci-title { font-weight: 500; }
 .chat-item .ci-time { font-size: 11px; color: var(--quiet); flex-shrink: 0; }
+.run-dot { width: 7px; height: 7px; border-radius: 50%; background: #2f7cf6; flex-shrink: 0; align-self: center; animation: run-pulse 1.4s ease-in-out infinite; }
+@keyframes run-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .run-dot { animation: none; } }
 .chat-item .ci-sub {
   font-size: 12px; color: var(--quiet); margin-top: 1px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
