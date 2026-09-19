@@ -681,7 +681,10 @@ async function openChat(project: string, path: string) {
     await switchSession(path);
     return;
   }
-  if (navigating || booting || sendInFlight) return;
+  if (navigating || booting || sendInFlight) {
+    if (sendInFlight) notify({ text: "Sending your message — one moment, then click again." });
+    return;
+  }
   if (dialogs.size) {
     notify({ text: "Answer the pending request before changing chats or folders." });
     return;
@@ -938,9 +941,10 @@ function blocks(): Block[] {
       });
       const attached = imgList(m.attachments);
       if (attached.length) out.push({ t: "text", key: `${key}-images`, text: "", images: attached });
-      if (m.stopReason === "error" || m.errorMessage) out.push({ t: "text", key: `${key}-error`, text: `**Response failed**
-
-${String(m.errorMessage ?? "The model could not finish. Please try again.")}` });
+      // An aborted turn (Esc, or switching chats mid-run) is an intentional stop,
+      // never a failure: render it as a quiet note instead of the error card.
+      if (m.stopReason === "aborted") out.push({ t: "text", key: `${key}-stopped`, text: "*Turn stopped.*" });
+      else if (m.stopReason === "error" || m.errorMessage) out.push({ t: "text", key: `${key}-error`, text: `**Response failed**\n\n${String(m.errorMessage ?? "The model could not finish. Please try again.")}` });
     }
     if (m.role === "toolResult" && !calls.has(String(m.toolCallId))) out.push({ t: "tool", id: String(m.toolCallId), key, name: m.toolName ?? "tool", args: {}, output: msgText(m), isError: !!m.isError, state: m.isError ? "failed" : "done" });
     if (m.role === "bashExecution") out.push({ t: "bash", key, command: m.command ?? "", output: m.output ?? "", exitCode: m.exitCode ?? 0 });
