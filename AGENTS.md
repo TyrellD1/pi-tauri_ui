@@ -3,9 +3,10 @@
 ## Guiding Principles
 
 ### 1. Clean UI / UX above all
-- Grayscale aesthetic only: `#fff`, `#fafafa`, `#f5f5f5`, `#e5e5e5`, `#a3a3a3`, `#737373`, `#525252`, `#171717`, `#0a0a0a`. No color except for semantic error/warning states (and even then, desaturated).
-- System font stack. No webfont downloads. `-apple-system, BlinkMacSystemFont, "SF Pro", Inter, system-ui, sans-serif`.
-- Monospace for code/tool output only: `ui-monospace, SFMono-Regular, Menlo, monospace`.
+- Grayscale aesthetic only, borrowed from the approved `/html` skill tokens (`--page/--ink/--muted/--quiet/--line/--surface/--surface-deep/--strong`, light + dark in `src/style.css`). Theme variables only — no hard-coded light-only colors. No color except for semantic error/warning states (and even then, desaturated).
+- System font stack. No webfont downloads. `-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif`.
+- Monospace for code/tool output only: `"SFMono-Regular", Consolas, "Liberation Mono", monospace`.
+- One icon-only sun/moon toggle in the header (moon in light, sun in dark). Follow the OS theme until manually overridden; persist the manual choice (`pi-theme`); apply before paint to avoid flash.
 - Quiet chrome: 1px `#e5e5e5` borders, 8–12px radii, subtle shadows only on floating elements.
 - Every interaction must feel instant (<100ms local feedback). Optimistic UI for sends. No spinners where a skeleton/shimmer will do. No layout shift.
 - Keyboard-first: `Cmd+N` new chat, `Cmd+K` search chats, `Enter` send, `Shift+Enter` newline, `Esc` abort/stop, `Cmd+,` settings.

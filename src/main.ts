@@ -619,6 +619,36 @@ inputEl.addEventListener("keydown", (e) => {
 });
 sendBtn.onclick = () => (streaming ? doAbort() : doSend());
 
+// ---------- theme: one sun/moon button, system-following until manual override ----------
+const themeBtn = $("btn-theme") as HTMLButtonElement;
+function applyThemeLabel() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  const label = dark ? "Switch to light theme" : "Switch to dark theme";
+  themeBtn.setAttribute("aria-label", label);
+  themeBtn.title = label;
+}
+function setTheme(theme: "light" | "dark", persist: boolean) {
+  document.documentElement.dataset.theme = theme;
+  if (persist) {
+    document.documentElement.dataset.themePreference = theme;
+    try {
+      localStorage.setItem("pi-theme", theme);
+    } catch {
+      /* storage unavailable — session-only */
+    }
+  }
+  applyThemeLabel();
+}
+themeBtn.onclick = () => {
+  setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
+};
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", (e) => {
+  if (document.documentElement.dataset.themePreference === "system") {
+    setTheme(e.matches ? "dark" : "light", false);
+  }
+});
+applyThemeLabel();
+
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
 ($("btn-cwd") as HTMLButtonElement).onclick = () => openSettings();
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
