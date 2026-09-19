@@ -39,6 +39,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
 
 const chatListEl = $("chat-list");
 const messagesEl = $("messages");
+const messagesInner = $("messages-inner");
 const inputEl = $("input") as HTMLTextAreaElement;
 const sendBtn = $("btn-send") as HTMLButtonElement;
 const statusLine = $("status-line");
@@ -185,9 +186,9 @@ function toolCardHtml(id: string, name: string, args: unknown, running: boolean)
 }
 
 function renderMessages() {
-  messagesEl.innerHTML = "";
+  messagesInner.innerHTML = "";
   if (messages.length === 0) {
-    messagesEl.innerHTML = `<div style="max-width:560px;margin:60px auto;text-align:center;color:#a3a3a3;">
+    messagesInner.innerHTML = `<div style="max-width:560px;margin:60px auto;text-align:center;color:#a3a3a3;">
       <div style="font-size:28px;color:#171717;font-weight:700;">π</div>
       <div style="font-weight:650;color:#525252;margin-top:8px;">Same pi, quieter room.</div>
       <div style="font-size:12.5px;margin-top:6px;">Full RPC harness — tools, sessions, models. Grayscale by design.<br/>Try “list files in this directory” or “explain this repo”.</div>
@@ -196,7 +197,7 @@ function renderMessages() {
         <button class="pill-btn" data-hint="What tools and models are available?">capabilities</button>
         <button class="pill-btn" data-hint="/help">slash commands</button>
       </div></div>`;
-    messagesEl.querySelectorAll("[data-hint]").forEach((b) => {
+    messagesInner.querySelectorAll("[data-hint]").forEach((b) => {
       (b as HTMLButtonElement).onclick = () => {
         inputEl.value = (b as HTMLElement).dataset.hint ?? "";
         autosize();
@@ -206,11 +207,11 @@ function renderMessages() {
     return;
   }
   for (const m of messages) {
-    messagesEl.appendChild(messageNode(m));
+    messagesInner.appendChild(messageNode(m));
   }
   // live streaming node
   if (streaming && (streamBuf.text || streamBuf.thinking || streamBuf.toolMeta.size > 0)) {
-    messagesEl.appendChild(streamingNode());
+    messagesInner.appendChild(streamingNode());
   }
   scrollBottom();
 }
