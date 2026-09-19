@@ -557,14 +557,18 @@ function hiddenProjects(): Set<string> {
     return new Set();
   }
 }
+let projectOrder: string[] = [];
 function getProjects(): string[] {
   const hidden = hiddenProjects();
-  const list = [...discovered];
-  for (const a of addedProjects()) if (!list.includes(a)) list.push(a);
-  if (cwd && !list.includes(cwd)) list.unshift(cwd);
-  const visible = list.filter((p) => !hidden.has(p));
-  visible.sort((a, b) => (a === cwd ? -1 : b === cwd ? 1 : 0));
-  return visible;
+  const known = new Set([...discovered, ...addedProjects()]);
+  if (cwd) known.add(cwd);
+  // Stable order: first-seen positions are kept forever, newcomers append at
+  // the end. The active project never jumps to the top.
+  projectOrder = projectOrder.filter((p) => known.has(p));
+  for (const p of discovered) if (!projectOrder.includes(p)) projectOrder.push(p);
+  for (const a of addedProjects()) if (!projectOrder.includes(a)) projectOrder.push(a);
+  if (cwd && !projectOrder.includes(cwd)) projectOrder.push(cwd);
+  return projectOrder.filter((p) => !hidden.has(p));
 }
 function saveExpanded() {
   prefSet("pi-expanded", JSON.stringify([...expandedProjects]));
@@ -1906,6 +1910,54 @@ applyThemeLabel();
 // ---------- header actions ----------
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
 ($("btn-add-project") as HTMLButtonElement).onclick = openAddProject;
+
+// ---------- sidebar resize: drag the edge, double-click resets ----------
+const sidebarEl = $("sidebar");
+const sideGrip = $("side-grip");
+const SIDE_W_MIN = 200, SIDE_W_MAX = 480;
+try {
+  const w = Number(prefGet("pi-sidebar-w"));
+  if (Number.isFinite(w) && w > 0) {
+    sidebarEl.style.width = `${Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, w))}px`;
+  }
+} catch {
+  /* ignore */
+}
+sideGrip.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  try {
+    sideGrip.setPointerCapture(e.pointerId);
+  } catch {
+    /* ignore */
+  }
+  sideGrip.classList.add("drag");
+  const startX = e.clientX;
+  const startW = sidebarEl.getBoundingClientRect().width;
+  const move = (ev: PointerEvent) => {
+    const w = Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, startW + ev.clientX - startX));
+    sidebarEl.style.width = `${w}px`;
+  };
+  const up = () => {
+    sideGrip.removeEventListener("pointermove", move);
+    sideGrip.classList.remove("drag");
+    try {
+      prefSet("pi-sidebar-w", String(Math.round(sidebarEl.getBoundingClientRect().width)));
+    } catch {
+      /* ignore */
+    }
+  };
+  sideGrip.addEventListener("pointermove", move);
+  sideGrip.addEventListener("pointerup", up, { once: true });
+  sideGrip.addEventListener("pointercancel", up, { once: true });
+});
+sideGrip.addEventListener("dblclick", () => {
+  sidebarEl.style.width = "";
+  try {
+    localStorage.removeItem("pi-sidebar-w");
+  } catch {
+    /* ignore */
+  }
+});
 cwdBtn.onclick = () => openSettings();
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
 
