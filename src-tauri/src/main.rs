@@ -364,6 +364,20 @@ async fn pi_list_sessions(state: State<'_, Arc<PiManager>>) -> Result<Value, Str
     Ok(serde_json::json!({"sessions": out, "active": active}))
 }
 
+/// Forward slug: session dir for a cwd. Matches pi's own layout
+/// (`--Users-name-workspace_a-projects-foo--`). No RPC round-trip needed.
+fn slug_for(cwd: &str) -> String {
+    format!("--{}--", cwd.replace('/', "-").trim_matches('-'))
+}
+
+#[tauri::command]
+async fn pi_project_chats(cwd: String) -> Result<Value, String> {
+    let dir = dirs::home_dir()
+        .map(|h| h.join(".pi").join("agent").join("sessions").join(slug_for(&cwd)));
+    let out = tokio::task::spawn_blocking(move || list_sessions(dir)).await.map_err(|e| e.to_string())??;
+    Ok(serde_json::json!({"sessions": out}))
+}
+
 fn list_sessions(dir: Option<PathBuf>) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     let Some(dir) = dir else { return Ok(out); };
@@ -449,7 +463,8 @@ fn main() {
             pi_set_cwd,
             pi_set_name,
             pi_ui_response,
-            pi_list_sessions
+            pi_list_sessions,
+            pi_project_chats
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

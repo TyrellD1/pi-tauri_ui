@@ -56,6 +56,14 @@ const connError = $("conn-error");
 // ---------- state ----------
 let activeName = "";
 let cwd = "", sessions: SessionInfo[] = [], activePath: string | null = null;
+const projectChats = new Map<string, SessionInfo[]>();
+let expandedProjects = new Set<string>();
+try {
+  const raw = prefGet("pi-expanded");
+  if (raw) expandedProjects = new Set(JSON.parse(raw) as string[]);
+} catch {
+  /* ignore */
+}
 const conversation = new Conversation();
 let messages: AgentMessage[] = conversation.messages;
 let streaming = false, stopping = false, booting = true, bootError: string | null = null;
@@ -528,91 +536,259 @@ function imgList(list: unknown): { data: string; mime: string }[] {
   return out;
 }
 
-// ---------- sidebar ----------
-function renderSessions() {
-  const q = filter.trim().toLowerCase();
-  const list = sessions.filter(
-    (s) => !q || (s.name ?? "").toLowerCase().includes(q) || s.preview.toLowerCase().includes(q)
-  );
-  chatListEl.innerHTML = "";
-  if (sessions.length === 0) {
-    const d = document.createElement("div");
-    d.className = "list-empty";
-    const p = document.createElement("p");
-    p.textContent = "No chats yet. Start a new one.";
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "text-btn";
-    b.textContent = "New chat";
-    b.onclick = () => newChat();
-    d.appendChild(p);
-    d.appendChild(b);
-    chatListEl.appendChild(d);
-    return;
+// ---------- projects + sidebar ----------
+function getProjects(): string[] {
+  try {
+    const raw = prefGet("pi-projects");
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    const list = Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : [];
+    if (cwd && !list.includes(cwd)) list.unshift(cwd);
+    return list;
+  } catch {
+    return cwd ? [cwd] : [];
   }
-  if (list.length === 0) {
-    const d = document.createElement("div");
-    d.className = "list-empty";
-    const p = document.createElement("p");
-    p.textContent = `No chats match "${filter}".`;
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "text-btn";
-    b.textContent = "Clear search";
-    b.onclick = () => {
-      searchEl.value = "";
-      filter = "";
-      visibleLimit = 100;
-      renderSessions();
-      searchEl.focus();
-    };
-    d.appendChild(p);
-    d.appendChild(b);
-    chatListEl.appendChild(d);
-    return;
+}
+function saveProjects(list: string[]) {
+  prefSet("pi-projects", JSON.stringify(list));
+}
+function saveExpanded() {
+  prefSet("pi-expanded", JSON.stringify([...expandedProjects]));
+}
+function baseName(p: string): string {
+  const parts = p.split("/").filter(Boolean);
+  return parts[parts.length - 1] || p;
+}
+
+async function fetchProjectChats(project: string, silent = true) {
+  try {
+    const res = await invokeChecked<{ sessions: SessionInfo[] }>("pi_project_chats", { cwd: project });
+    projectChats.set(project, res.sessions ?? []);
+  } catch (e) {
+    if (!projectChats.has(project)) projectChats.set(project, []);
+    if (!silent) notify({ text: `Couldn't list chats for ${baseName(project)}: ${String(e)}`, kind: "error" });
   }
-  // Bounded visible window over the full session list: search filters across
-  // every session the backend returned (paths are real), paging keeps the DOM
-  // small no matter how many chats exist.
-  visibleLimit = Math.min(visibleLimit, Math.max(100, Math.ceil(list.length / 100) * 100));
-  const capped = list.slice(visibleLimit - 100, visibleLimit);
-  for (const s of capped) {
-    const el = document.createElement("button");
-    el.type = "button";
-    el.className = "chat-item";
-    const selected = s.path === activePath;
-    if (selected) el.setAttribute("aria-current", "true");
-    el.setAttribute("aria-label", `${s.name || s.preview.slice(0, 60) || "Untitled"}, ${fmtRelative(s.mtime)}`);
+  renderProjects();
+}
+
+async function refreshAllProjects() {
+  const list = getProjects();
+  saveProjects(list);
+  if (cwd && !expandedProjects.has(cwd)) {
+    expandedProjects.add(cwd);
+    saveExpanded();
+  }
+  await Promise.allSettled(list.filter((p) => p !== cwd).map((p) => fetchProjectChats(p, true)));
+  renderProjects();
+}
+
+function openAddProject() {
+  openModal("Add project", (box, close) => {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = "Paste the full path of a project folder, e.g. /Users/you/workspace_a/projects/my-app. Its chats appear below.";
+    const lab = document.createElement("label");
+    lab.textContent = "Project folder";
+    lab.setAttribute("for", "m-project");
+    const inp = document.createElement("input");
+    inp.id = "m-project";
+    inp.placeholder = "/Users/you/workspace_a/projects/…";
     const row = document.createElement("div");
-    row.className = "ci-row";
-    const t = document.createElement("div");
-    t.className = "ci-title";
-    t.textContent = s.name || s.preview.slice(0, 42) || "Untitled";
-    const time = document.createElement("div");
-    time.className = "ci-time";
-    time.textContent = fmtRelative(s.mtime);
-    row.appendChild(t);
-    row.appendChild(time);
-    const sub = document.createElement("div");
-    sub.className = "ci-sub";
-    sub.textContent = s.preview.slice(0, 80);
-    el.appendChild(row);
-    if (s.name && s.preview && s.preview !== s.name) el.appendChild(sub);
-    el.disabled = navigating || booting || streaming;
-    el.onclick = () => switchSession(s.path);
-    chatListEl.appendChild(el);
+    row.className = "dialog-actions";
+    const c = document.createElement("button");
+    c.type = "button";
+    c.textContent = "Cancel";
+    c.onclick = close;
+    const s = document.createElement("button");
+    s.type = "button";
+    s.textContent = "Add";
+    s.className = "primary";
+    s.onclick = async () => {
+      const path = inp.value.trim();
+      close();
+      if (!path) return;
+      const list = getProjects();
+      if (!list.includes(path)) {
+        saveProjects([...list, path]);
+        expandedProjects.add(path);
+        saveExpanded();
+        await fetchProjectChats(path);
+      } else {
+        expandedProjects.add(path);
+        saveExpanded();
+        renderProjects();
+      }
+    };
+    row.appendChild(c);
+    row.appendChild(s);
+    box.appendChild(p);
+    box.appendChild(lab);
+    box.appendChild(inp);
+    box.appendChild(row);
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) s.click();
+    });
+  });
+}
+
+function removeProject(project: string) {
+  saveProjects(getProjects().filter((p) => p !== project));
+  projectChats.delete(project);
+  expandedProjects.delete(project);
+  saveExpanded();
+  renderProjects();
+}
+
+async function openChat(project: string, path: string) {
+  if (project === cwd) {
+    await switchSession(path);
+    return;
   }
-  if (list.length > 100) {
-    const nav = document.createElement("div"); nav.className = "list-empty";
-    const label = document.createElement("p"); label.textContent = `${visibleLimit - 99}–${Math.min(visibleLimit, list.length)} of ${list.length}`;
-    nav.appendChild(label);
-    for (const [text, step] of [["Previous chats", -100], ["Older chats", 100]] as const) {
-      const b = document.createElement("button"); b.type = "button"; b.className = "text-btn"; b.textContent = text;
-      b.disabled = step < 0 ? visibleLimit === 100 : visibleLimit >= list.length;
-      b.onclick = () => { visibleLimit += step; renderSessions(); chatListEl.scrollTop = 0; chatListEl.querySelector<HTMLButtonElement>(".chat-item")?.focus(); };
-      nav.appendChild(b);
+  if (navigating || booting || sendInFlight) return;
+  if (dialogs.size) {
+    notify({ text: "Answer the pending request before changing chats or folders." });
+    return;
+  }
+  if (streaming) {
+    notify({ text: "Stop the running turn before changing chats or folders." });
+    return;
+  }
+  saveDraft();
+  await setCwd(project);
+  if (cwd !== project) return;
+  expandedProjects.add(project);
+  saveExpanded();
+  await switchSession(path);
+  await fetchProjectChats(project);
+}
+
+function chatMatches(s: SessionInfo, q: string): boolean {
+  return !q || (s.name ?? "").toLowerCase().includes(q) || s.preview.toLowerCase().includes(q);
+}
+
+function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "chat-item";
+  const selected = s.path === activePath;
+  if (selected) el.setAttribute("aria-current", "true");
+  el.setAttribute("aria-label", `${s.name || s.preview.slice(0, 60) || "Untitled"}, ${fmtRelative(s.mtime)}`);
+  const row = document.createElement("div");
+  row.className = "ci-row";
+  const t = document.createElement("div");
+  t.className = "ci-title";
+  t.textContent = s.name || s.preview.slice(0, 42) || "Untitled";
+  const time = document.createElement("div");
+  time.className = "ci-time";
+  time.textContent = fmtRelative(s.mtime);
+  row.appendChild(t);
+  row.appendChild(time);
+  const sub = document.createElement("div");
+  sub.className = "ci-sub";
+  sub.textContent = s.preview.slice(0, 80);
+  el.appendChild(row);
+  if (s.name && s.preview && s.preview !== s.name) el.appendChild(sub);
+  el.disabled = navigating || booting || streaming;
+  el.onclick = () => openChat(project, s.path);
+  return el;
+}
+
+function renderProjects() {
+  const q = filter.trim().toLowerCase();
+  const projects = getProjects();
+  chatListEl.innerHTML = "";
+  if (projects.length === 0) {
+    const d = document.createElement("div");
+    d.className = "list-empty";
+    const p = document.createElement("p");
+    p.textContent = "No projects yet. Add one to see its chats.";
+    d.appendChild(p);
+    chatListEl.appendChild(d);
+    return;
+  }
+  for (const p of projects) {
+    const all = projectChats.get(p) ?? (p === cwd ? sessions : []);
+    const list = all.filter((s) => chatMatches(s, q));
+    const section = document.createElement("div");
+    section.className = "project-section";
+    section.setAttribute("role", "group");
+    section.setAttribute("aria-label", p);
+    const row = document.createElement("div");
+    row.className = "p-row";
+    const head = document.createElement("button");
+    head.type = "button";
+    head.className = "project-head";
+    const open = !!q || expandedProjects.has(p);
+    if (open) head.classList.add("open");
+    head.setAttribute("aria-expanded", String(open));
+    head.title = p;
+    const chev = document.createElement("span");
+    chev.innerHTML = chevSvg();
+    const name = document.createElement("span");
+    name.className = "p-name";
+    name.textContent = baseName(p);
+    const count = document.createElement("span");
+    count.className = "p-count";
+    count.textContent = String(list.length);
+    head.appendChild(chev);
+    head.appendChild(name);
+    head.appendChild(count);
+    head.onclick = () => {
+      if (expandedProjects.has(p)) expandedProjects.delete(p);
+      else expandedProjects.add(p);
+      saveExpanded();
+      renderProjects();
+    };
+    row.appendChild(head);
+    if (p !== cwd) {
+      const x = document.createElement("button");
+      x.type = "button";
+      x.className = "p-x";
+      x.textContent = "✕";
+      x.title = `Remove ${baseName(p)} from the list`;
+      x.setAttribute("aria-label", `Remove ${baseName(p)} from the list`);
+      x.onclick = () => removeProject(p);
+      row.appendChild(x);
     }
-    chatListEl.appendChild(nav);
+    section.appendChild(row);
+    if (open) {
+      const box = document.createElement("div");
+      box.className = "project-chats";
+      if (list.length === 0) {
+        const e = document.createElement("div");
+        e.className = "project-empty";
+        e.textContent = q ? "No matches in this project." : "No chats yet.";
+        box.appendChild(e);
+      } else if (p === cwd) {
+        // Bounded visible window over the full session list: search filters across
+        // every session the backend returned (paths are real), paging keeps the DOM
+        // small no matter how many chats exist.
+        visibleLimit = Math.min(visibleLimit, Math.max(100, Math.ceil(list.length / 100) * 100));
+        const capped = list.slice(visibleLimit - 100, visibleLimit);
+        for (const s of capped) box.appendChild(chatButton(s, p));
+        if (list.length > 100) {
+          const nav = document.createElement("div"); nav.className = "list-empty";
+          const label = document.createElement("p"); label.textContent = `${visibleLimit - 99}–${Math.min(visibleLimit, list.length)} of ${list.length}`;
+          nav.appendChild(label);
+          for (const [text, step] of [["Previous chats", -100], ["Older chats", 100]] as const) {
+            const b = document.createElement("button"); b.type = "button"; b.className = "text-btn"; b.textContent = text;
+            b.disabled = step < 0 ? visibleLimit === 100 : visibleLimit >= list.length;
+            b.onclick = () => { visibleLimit += step; renderProjects(); chatListEl.scrollTop = 0; chatListEl.querySelector<HTMLButtonElement>(".chat-item")?.focus(); };
+            nav.appendChild(b);
+          }
+          box.appendChild(nav);
+        }
+      } else {
+        for (const s of list.slice(0, 100)) box.appendChild(chatButton(s, p));
+        if (list.length > 100) {
+          const more = document.createElement("div");
+          more.className = "project-empty";
+          more.textContent = `${list.length - 100} more — refine search or open the project.`;
+          box.appendChild(more);
+        }
+      }
+      section.appendChild(box);
+    }
+    chatListEl.appendChild(section);
   }
 }
 
@@ -986,7 +1162,7 @@ function applyState(st: Record<string, unknown>) {
   chatTitle.textContent = activeName || deriveTitle() || "New chat";
   const level = String(st.thinkingLevel ?? thinkingSelect.value);
   if ([...thinkingSelect.options].some(o => o.value === level)) thinkingSelect.value = level;
-  setBusy(st.isStreaming === true); renderSessions();
+  setBusy(st.isStreaming === true); renderProjects();
 }
 async function refreshState() {
   const gen = bootGen;
@@ -1024,7 +1200,9 @@ async function refreshSessions() {
   try {
     const res = await invokeChecked<{sessions: SessionInfo[]}>("pi_list_sessions");
     if (gen !== bootGen) return;
-    sessionsErrShown = false; sessions = res.sessions ?? []; renderSessions();
+    sessionsErrShown = false; sessions = res.sessions ?? [];
+    projectChats.set(cwd, sessions);
+    renderProjects();
   } catch (e) {
     if (gen === bootGen && !sessionsErrShown) { sessionsErrShown = true; notify({ text: `Couldn't list chats: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => { sessionsErrShown = false; refreshSessions(); } }); }
   }
@@ -1630,6 +1808,7 @@ applyThemeLabel();
 
 // ---------- header actions ----------
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
+($("btn-add-project") as HTMLButtonElement).onclick = openAddProject;
 cwdBtn.onclick = () => openSettings();
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
 
@@ -1659,7 +1838,7 @@ searchEl.addEventListener("input", () => {
   debounceT = window.setTimeout(() => {
     filter = searchEl.value;
     visibleLimit = 100;
-    renderSessions();
+    renderProjects();
   }, 150);
 });
 
@@ -1709,7 +1888,7 @@ async function boot(_respawn = false): Promise<void> {
       clearRunScope(true); await refreshState();
       if (gen !== bootGen) return;
       booting = false; restoreDraft();
-      await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshStats();
+      await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshStats();
       if (gen !== bootGen) return;
       hideConnError(); renderSettled(); inputEl.focus();
     } catch (e) {
