@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs"
+    "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs",
+    "install": "./install-latest.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
