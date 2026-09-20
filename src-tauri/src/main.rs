@@ -1,15 +1,25 @@
-// pi-tauri_ui — Rust backend: single long-lived `pi --mode rpc` harness.
+// pi-tauri_ui — Rust backend: a small pool of `pi --mode rpc` processes,
+// one per live chat. Switching chats never disturbs a running turn: every
+// command carries its scope (cwd + optional session file) and is routed to
+// the process holding that session, spawning (and switching/new_session
+// inside that process) on demand. Idle processes are reaped lazily on pool
+// access — no timers, so idle = 0% CPU.
 //
 // Protocol notes (see AGENTS.md + pi docs/rpc.md):
 // - JSONL over stdin/stdout, LF (\n) only delimiter, strip trailing \r.
 // - Never split on U+2028/U+2029. We use read_until(b'\n') only.
 // - Commands with `id` get a correlated `response`. Events stream otherwise.
+// - Every emitted event is tagged with `instance`, `session`, `cwd` so the
+//   UI can route it to the right chat.
 
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{Arc, atomic::{AtomicU64, Ordering}},
-    time::UNIX_EPOCH,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, UNIX_EPOCH},
     io::BufRead,
 };
 
@@ -17,31 +27,43 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, Command},
+    process::{Child, ChildStdin, ChildStdout, Command},
     sync::{oneshot, Mutex},
 };
 
-struct PiInner {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    cwd: String,
-}
+/// Cap + idle reaping keep the pool near terminal-pi costs: a handful of
+/// processes for a handful of chats, never a runaway.
+const MAX_LIVE: usize = 6;
+const IDLE_SECS: u64 = 15 * 60;
 
-struct PiManager {
-    inner: Mutex<PiInner>,
+struct Instance {
+    id: u64,
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
     pending: Mutex<HashMap<String, oneshot::Sender<Value>>>,
-    generation: AtomicU64,
+    cwd: String,
+    session_file: Mutex<Option<String>>,
+    streaming: AtomicBool,
+    retired: AtomicBool,
+    last_active: Mutex<Instant>,
 }
 
-impl PiManager {
+struct Pool {
+    instances: Mutex<HashMap<u64, Arc<Instance>>>,
+    recent: Mutex<HashMap<String, String>>,
+    next_id: AtomicU64,
+    default_model: Mutex<Option<(String, String)>>,
+    default_thinking: Mutex<Option<String>>,
+}
+
+impl Pool {
     fn new() -> Self {
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/tmp".to_string());
         Self {
-            inner: Mutex::new(PiInner { child: None, stdin: None, cwd }),
-            pending: Mutex::new(HashMap::new()),
-            generation: AtomicU64::new(0),
+            instances: Mutex::new(HashMap::new()),
+            recent: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            default_model: Mutex::new(None),
+            default_thinking: Mutex::new(None),
         }
     }
 }
@@ -55,40 +77,71 @@ fn checked_response(v: Value) -> Result<Value, String> {
     Ok(v)
 }
 
-async fn write_line(state: &State<'_, Arc<PiManager>>, line: &str) -> Result<(), String> {
-    let mut inner = state.inner.lock().await;
-    let stdin = inner.stdin.as_mut().ok_or("pi process not running")?;
-    stdin
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|e| format!("stdin write failed: {}", e))?;
-    stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
-    stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
-    Ok(())
+/// Pure victim selection for the lazy reaper (unit-tested): expired idle
+/// first, then oldest idle beyond the cap. Streaming instances are immortal.
+fn sweep_plan(states: &[(u64, bool, Instant)], now: Instant, max_live: usize, idle: Duration) -> Vec<u64> {
+    let mut kill = Vec::new();
+    let mut idle_survivors: Vec<(u64, Instant)> = Vec::new();
+    let mut streaming = 0usize;
+    for (id, is_streaming, last) in states {
+        if *is_streaming {
+            streaming += 1;
+        } else if now.duration_since(*last) > idle {
+            kill.push(*id);
+        } else {
+            idle_survivors.push((*id, *last));
+        }
+    }
+    idle_survivors.sort_by_key(|(_, t)| *t);
+    let allowed_idle = max_live.saturating_sub(streaming);
+    while idle_survivors.len() > allowed_idle {
+        kill.push(idle_survivors.remove(0).0);
+    }
+    kill
 }
 
-/// Send a command and wait for the correlated `response` (30s timeout).
-async fn request(state: &State<'_, Arc<PiManager>>, mut cmd: Value) -> Result<Value, String> {
+async fn touch(inst: &Instance) {
+    *inst.last_active.lock().await = Instant::now();
+}
+
+/// Send a command to one instance and wait for its correlated `response`.
+async fn inst_request(inst: &Instance, mut cmd: Value) -> Result<Value, String> {
     let id = uuid::Uuid::new_v4().to_string();
     cmd["id"] = Value::String(id.clone());
     let (tx, rx) = oneshot::channel();
-    {
-        let mut p = state.pending.lock().await;
-        p.insert(id.clone(), tx);
-    }
+    inst.pending.lock().await.insert(id.clone(), tx);
     let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
-    if let Err(e) = write_line(state, &line).await {
-        state.pending.lock().await.remove(&id);
+    let write_ok = async {
+        let mut stdin = inst.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write failed: {}", e))?;
+        stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
+        stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(e) = write_ok {
+        inst.pending.lock().await.remove(&id);
         return Err(e);
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+    touch(inst).await;
+    match tokio::time::timeout(Duration::from_secs(30), rx).await {
         Ok(Ok(v)) => checked_response(v),
         Ok(Err(_)) => Err("request cancelled".to_string()),
         Err(_) => {
-            state.pending.lock().await.remove(&id);
+            inst.pending.lock().await.remove(&id);
             Err("pi timed out (30s)".to_string())
         }
     }
+}
+
+async fn fire_inst(inst: &Instance, cmd: Value) -> Result<(), String> {
+    let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
+    let mut stdin = inst.stdin.lock().await;
+    stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write failed: {}", e))?;
+    stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
+    stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
+    touch(inst).await;
+    Ok(())
 }
 
 /// Map frontend attachments ([{data: base64, mimeType}]) to RPC ImageContent blocks.
@@ -110,12 +163,7 @@ fn attach_images(cmd: &mut Value, images: Option<Vec<Value>>) {
     }
 }
 
-async fn fire(state: &State<'_, Arc<PiManager>>, cmd: Value) -> Result<(), String> {
-    let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
-    write_line(state, &line).await
-}
-
-fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::process::ChildStdout, generation: u64) {
+fn spawn_reader(app: AppHandle, pool: Arc<Pool>, inst: Arc<Instance>, mut stdout: ChildStdout) {
     tokio::spawn(async move {
         let mut reader = BufReader::new(&mut stdout);
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -124,7 +172,6 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
             match reader.read_until(b'\n', &mut buf).await {
                 Ok(0) => break, // EOF
                 Ok(_) => {
-                    if state.generation.load(Ordering::SeqCst) != generation { return; }
                     // strip trailing \n and optional \r — nothing else
                     while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
                         buf.pop();
@@ -132,18 +179,32 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
                     if buf.is_empty() {
                         continue;
                     }
-                    let v: Value = match serde_json::from_slice(&buf) {
+                    let mut v: Value = match serde_json::from_slice(&buf) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
                     // correlated response?
                     if v.get("type").and_then(|t| t.as_str()) == Some("response") {
                         if let Some(id) = v.get("id").and_then(|i| i.as_str()) {
-                            let tx = { state.pending.lock().await.remove(id) };
+                            let tx = inst.pending.lock().await.remove(id);
                             if let Some(tx) = tx {
                                 let _ = tx.send(v);
                                 continue;
                             }
+                        }
+                    }
+                    // Snoop run state for the reaper; tag the event for routing.
+                    match v.get("type").and_then(|t| t.as_str()) {
+                        Some("agent_start") => inst.streaming.store(true, Ordering::SeqCst),
+                        Some("agent_settled") => inst.streaming.store(false, Ordering::SeqCst),
+                        _ => {}
+                    }
+                    touch(&inst).await;
+                    if let Value::Object(map) = &mut v {
+                        map.insert("instance".to_string(), Value::from(inst.id));
+                        map.insert("cwd".to_string(), Value::String(inst.cwd.clone()));
+                        if let Some(f) = inst.session_file.lock().await.clone() {
+                            map.insert("session".to_string(), Value::String(f));
                         }
                     }
                     let _ = app.emit("pi-event", v);
@@ -151,140 +212,310 @@ fn spawn_reader(app: AppHandle, state: Arc<PiManager>, mut stdout: tokio::proces
                 Err(_) => break,
             }
         }
-        if state.generation.load(Ordering::SeqCst) == generation {
-            state.pending.lock().await.clear();
-            let _ = app.emit("pi-event", serde_json::json!({"type": "process_disconnected"}));
+        inst.pending.lock().await.clear();
+        if !inst.retired.load(Ordering::SeqCst) {
+            pool.instances.lock().await.remove(&inst.id);
+            let mut disc = serde_json::json!({"type": "instance_disconnected", "instance": inst.id, "cwd": inst.cwd});
+            if let Some(f) = inst.session_file.lock().await.clone() {
+                disc["session"] = Value::String(f);
+            }
+            let _ = app.emit("pi-event", disc);
         }
     });
 }
 
-async fn kill_child(inner: &mut PiInner) {
-    if let Some(mut child) = inner.child.take() {
-        let _ = child.kill().await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), child.wait()).await;
+async fn spawn_instance(app: &AppHandle, pool: &Arc<Pool>, cwd: &str) -> Result<Arc<Instance>, String> {
+    let target = if cwd.trim().is_empty() {
+        std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "/tmp".to_string())
+    } else {
+        cwd.trim().to_string()
+    };
+    if !PathBuf::from(&target).is_dir() {
+        return Err(format!("not a directory: {}", target));
     }
-    inner.stdin = None;
+    let mut child = Command::new("pi")
+        .arg("--mode")
+        .arg("rpc")
+        .current_dir(&target)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("failed to spawn `pi --mode rpc`: {} (is pi on PATH?)", e))?;
+    let stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let id = pool.next_id.fetch_add(1, Ordering::SeqCst);
+    let inst = Arc::new(Instance {
+        id,
+        child: Mutex::new(child),
+        stdin: Mutex::new(stdin),
+        pending: Mutex::new(HashMap::new()),
+        cwd: target,
+        session_file: Mutex::new(None),
+        streaming: AtomicBool::new(false),
+        retired: AtomicBool::new(false),
+        last_active: Mutex::new(Instant::now()),
+    });
+    spawn_reader(app.clone(), pool.clone(), inst.clone(), stdout);
+    // New processes inherit the UI's chosen model/thinking so chats never diverge.
+    if let Some((p, m)) = pool.default_model.lock().await.clone() {
+        let _ = inst_request(&inst, serde_json::json!({"type": "set_model", "provider": p, "modelId": m})).await;
+    }
+    if let Some(l) = pool.default_thinking.lock().await.clone() {
+        let _ = inst_request(&inst, serde_json::json!({"type": "set_thinking_level", "level": l})).await;
+    }
+    pool.instances.lock().await.insert(id, inst.clone());
+    Ok(inst)
+}
+
+/// Re-read which session file an instance holds (created on first prompt,
+/// changed by switch/new_session). Keeps scope→instance routing exact.
+async fn learn_file(pool: &Arc<Pool>, inst: &Instance) {
+    if let Ok(r) = inst_request(inst, serde_json::json!({"type": "get_state"})).await {
+        if let Some(f) = r.pointer("/data/sessionFile").and_then(Value::as_str) {
+            *inst.session_file.lock().await = Some(f.to_string());
+            pool.recent.lock().await.insert(inst.cwd.clone(), f.to_string());
+        }
+    }
+}
+
+async fn kill_instance(pool: &Arc<Pool>, inst: &Arc<Instance>) {
+    inst.retired.store(true, Ordering::SeqCst);
+    {
+        let mut child = inst.child.lock().await;
+        let _ = child.kill().await;
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+    }
+    pool.instances.lock().await.remove(&inst.id);
+    inst.pending.lock().await.clear();
+}
+
+/// Lazy reaper: runs on pool access, never on a timer (idle = 0% CPU).
+async fn sweep(pool: &Arc<Pool>) {
+    let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
+    let mut states = Vec::with_capacity(insts.len());
+    for i in &insts {
+        states.push((i.id, i.streaming.load(Ordering::SeqCst), *i.last_active.lock().await));
+    }
+    let victims = sweep_plan(&states, Instant::now(), MAX_LIVE, Duration::from_secs(IDLE_SECS));
+    for id in victims {
+        if let Some(inst) = pool.instances.lock().await.get(&id).cloned() {
+            if !inst.streaming.load(Ordering::SeqCst) {
+                kill_instance(pool, &inst).await;
+            }
+        }
+    }
+}
+
+/// Single matcher for every scope lookup. `session: Some` pins an exact
+/// session (any run state); `None` prefers the live run in that cwd (a
+/// fresh composer attaching to its own just-sent turn), else a never-run
+/// instance, else nothing.
+async fn match_instance(pool: &Arc<Pool>, cwd: &str, session: Option<&str>) -> Option<Arc<Instance>> {
+    let map = pool.instances.lock().await;
+    let mut fallback: Option<Arc<Instance>> = None;
+    let mut hit: Option<Arc<Instance>> = None;
+    for inst in map.values() {
+        if inst.cwd != cwd {
+            continue;
+        }
+        let file = match inst.session_file.try_lock() {
+            Ok(f) => f.clone(),
+            Err(_) => continue,
+        };
+        match session {
+            Some(p) => {
+                if file.as_deref() == Some(p) {
+                    hit = Some(inst.clone());
+                    break;
+                }
+            }
+            None => {
+                if inst.streaming.load(Ordering::SeqCst) {
+                    hit = Some(inst.clone());
+                    break;
+                }
+                if file.is_none() && fallback.is_none() {
+                    fallback = Some(inst.clone());
+                }
+            }
+        }
+    }
+    drop(map);
+    let inst = hit.or(fallback)?;
+    touch(&inst).await;
+    Some(inst)
+}
+
+/// Lookup only: runs that must address a live process (abort, dialog
+/// responses, queue clears) fail instead of spawning a stranger.
+async fn find(pool: &Arc<Pool>, cwd: &str, session: Option<&str>) -> Option<Arc<Instance>> {
+    sweep(pool).await;
+    match_instance(pool, cwd, session).await
+}
+
+/// Route a scope to its process, spawning (and switching/new_session inside
+/// that process) on demand. `pristine` = a fresh empty session is required
+/// (new chat, or the first prompt of a chat with no session yet). Pristine
+/// reuse only ever touches never-run idle instances — live sessions are
+/// never disturbed.
+async fn ensure(app: &AppHandle, pool: &Arc<Pool>, cwd: &str, session: Option<String>, pristine: bool) -> Result<Arc<Instance>, String> {
+    sweep(pool).await;
+    if pristine && session.is_none() {
+        let cand = {
+            let map = pool.instances.lock().await;
+            let mut found: Option<Arc<Instance>> = None;
+            for inst in map.values() {
+                if inst.cwd != cwd || inst.streaming.load(Ordering::SeqCst) {
+                    continue;
+                }
+                if inst.session_file.try_lock().map(|f| f.is_none()).unwrap_or(false) {
+                    found = Some(inst.clone());
+                    break;
+                }
+            }
+            found
+        };
+        if let Some(inst) = cand {
+            touch(&inst).await;
+            inst_request(&inst, serde_json::json!({"type": "new_session"})).await?;
+            learn_file(pool, &inst).await;
+            return Ok(inst);
+        }
+    } else if let Some(inst) = match_instance(pool, cwd, session.as_deref()).await {
+        // Folder-open default: no session requested — prefer the cwd's
+        // most recent live session over whatever this one holds.
+        if session.is_none() {
+            if let Some(recent) = pool.recent.lock().await.get(cwd).cloned() {
+                if let Some(live) = match_instance(pool, cwd, Some(&recent)).await {
+                    return Ok(live);
+                }
+            }
+        }
+        return Ok(inst);
+    } else if session.is_none() {
+        if let Some(recent) = pool.recent.lock().await.get(cwd).cloned() {
+            if let Some(live) = match_instance(pool, cwd, Some(&recent)).await {
+                return Ok(live);
+            }
+        }
+    }
+    let inst = spawn_instance(app, pool, cwd).await?;
+    if let Some(p) = session {
+        inst_request(&inst, serde_json::json!({"type": "switch_session", "sessionPath": p})).await?;
+        learn_file(pool, &inst).await;
+    } else if pristine {
+        inst_request(&inst, serde_json::json!({"type": "new_session"})).await?;
+        learn_file(pool, &inst).await;
+    } else {
+        learn_file(pool, &inst).await;
+    }
+    Ok(inst)
 }
 
 // ---------- commands ----------
 
-#[tauri::command]
-async fn pi_spawn(cwd: Option<String>, app: AppHandle, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let target = match cwd {
-        Some(c) if !c.trim().is_empty() => c.trim().to_string(),
-        _ => state.inner.lock().await.cwd.clone(),
-    };
-    // validate dir exists
-    let p = PathBuf::from(&target);
-    if !p.is_dir() {
-        return Err(format!("not a directory: {}", target));
-    }
-    {
-        let mut inner = state.inner.lock().await;
-        let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        state.pending.lock().await.clear();
-        kill_child(&mut inner).await;
-        let mut child = Command::new("pi")
-            .arg("--mode")
-            .arg("rpc")
-            .current_dir(&target)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("failed to spawn `pi --mode rpc`: {} (is pi on PATH?)", e))?;
-        let stdin = child.stdin.take().ok_or("no stdin")?;
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        inner.child = Some(child);
-        inner.stdin = Some(stdin);
-        inner.cwd = target.clone();
-        drop(inner);
-        let mgr = state.inner();
-        spawn_reader(app.clone(), mgr.clone(), stdout, generation);
-    }
-    Ok(serde_json::json!({ "ok": true, "cwd": target }))
-}
+// NOTE: no pi_spawn / pi_set_cwd commands — spawning is lazy inside
+// `ensure`. Switching folders never respawns anything; each chat's process
+// lives until the lazy reaper retires it.
 
 #[tauri::command]
-async fn pi_prompt(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    // fire-and-accept: response only means accepted/queued, events stream after
+async fn pi_prompt(cwd: String, session: Option<String>, message: String, images: Option<Vec<Value>>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // fire-and-accept: response only means accepted/queued, events stream after.
+    // No session yet = this chat's first turn: pristine routing guarantees an
+    // empty session (never another chat's live one).
+    let inst = ensure(&app, &pool, &cwd, session, true).await?;
     let mut cmd = serde_json::json!({ "type": "prompt", "message": message });
     attach_images(&mut cmd, images);
-    request(&state, cmd).await?;
+    inst_request(&inst, cmd).await?;
+    learn_file(&pool, &inst).await;
     Ok(serde_json::json!({ "accepted": true }))
 }
 
 #[tauri::command]
-async fn pi_steer(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+async fn pi_steer(cwd: String, session: Option<String>, message: String, images: Option<Vec<Value>>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
     let mut cmd = serde_json::json!({ "type": "steer", "message": message });
     attach_images(&mut cmd, images);
-    let r = request(&state, cmd).await?;
+    let r = inst_request(&inst, cmd).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_follow_up(message: String, images: Option<Vec<Value>>, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+async fn pi_follow_up(cwd: String, session: Option<String>, message: String, images: Option<Vec<Value>>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     // exact RPC `follow_up`: queued, delivered only when the agent finishes
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
     let mut cmd = serde_json::json!({ "type": "follow_up", "message": message });
     attach_images(&mut cmd, images);
-    let r = request(&state, cmd).await?;
+    let r = inst_request(&inst, cmd).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_clear_queue(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    // explicit user action only — Esc/Stop must not silently clear queued items
-    let r = request(&state, serde_json::json!({ "type": "clear_queue" })).await?;
+async fn pi_clear_queue(cwd: String, session: Option<String>, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // explicit user action only — Esc/Stop must not silently clear queued items.
+    // Lookup only: never spawn a stranger just to clear its (empty) queue.
+    let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "clear_queue" })).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_abort(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+async fn pi_abort(cwd: String, session: Option<String>, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     // Stop only. Queued steering/follow-up messages are preserved (abort
     // continues them when they remain); the UI offers an explicit Clear.
-    let r = request(&state, serde_json::json!({ "type": "abort" })).await?;
+    // Lookup only: a missing process means nothing is running.
+    let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "abort" })).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_new_session(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "new_session" })).await?;
-    Ok(r)
+async fn pi_new_chat(cwd: String, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // A guaranteed-empty session in its own (or a safely reused) process.
+    // Never disturbs running chats — the old new_session-on-the-only-process
+    // is exactly what this pool retires.
+    let inst = ensure(&app, &pool, &cwd, None, true).await?;
+    learn_file(&pool, &inst).await;
+    let path = inst.session_file.lock().await.clone().ok_or("couldn't create session")?;
+    Ok(serde_json::json!({ "path": path }))
 }
 
 #[tauri::command]
-async fn pi_switch_session(path: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "switch_session", "sessionPath": path })).await?;
-    Ok(r)
-}
-
-#[tauri::command]
-async fn pi_get_messages(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "get_messages" })).await?;
+async fn pi_get_messages(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "get_messages" })).await?;
     let msgs = r.pointer("/data/messages").cloned().unwrap_or(Value::Null);
     Ok(serde_json::json!({ "messages": msgs }))
 }
 
 #[tauri::command]
-async fn pi_get_state(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "get_state" })).await?;
+async fn pi_get_state(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
     let mut data = r.pointer("/data").cloned().unwrap_or(serde_json::json!({}));
-    let cwd = state.inner.lock().await.cwd.clone();
-    data["cwd"] = Value::String(cwd);
+    data["cwd"] = Value::String(inst.cwd.clone());
+    // Free affirmation: every state read keeps scope routing exact.
+    if let Some(f) = data.get("sessionFile").and_then(Value::as_str) {
+        *inst.session_file.lock().await = Some(f.to_string());
+        pool.recent.lock().await.insert(inst.cwd.clone(), f.to_string());
+    }
     Ok(data)
 }
 
 #[tauri::command]
-async fn pi_get_stats(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "get_session_stats" })).await?;
+async fn pi_get_stats(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "get_session_stats" })).await?;
     Ok(r.pointer("/data").cloned().unwrap_or(Value::Null))
 }
 
 #[tauri::command]
-async fn pi_get_models(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let models_r = request(&state, serde_json::json!({ "type": "get_available_models" })).await?;
-    let state_r = request(&state, serde_json::json!({ "type": "get_state" })).await?;
+async fn pi_get_models(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let models_r = inst_request(&inst, serde_json::json!({ "type": "get_available_models" })).await?;
+    let state_r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
     let models = models_r.pointer("/data/models").cloned().unwrap_or(Value::Null);
     let cur = state_r
         .pointer("/data/model")
@@ -298,50 +529,49 @@ async fn pi_get_models(state: State<'_, Arc<PiManager>>) -> Result<Value, String
 }
 
 #[tauri::command]
-async fn pi_set_model(provider: String, model_id: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(
-        &state,
-        serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id }),
-    )
-    .await?;
-    if r.get("success").and_then(|s| s.as_bool()) == Some(true) {
-        Ok(r)
-    } else {
-        Err(r.get("error").and_then(|e| e.as_str()).unwrap_or("set_model failed").to_string())
+async fn pi_set_model(provider: String, model_id: String, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // Fan-out: every live chat follows, and future spawns inherit.
+    *pool.default_model.lock().await = Some((provider.clone(), model_id.clone()));
+    let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
+    for inst in &insts {
+        let _ = inst_request(inst, serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id })).await;
     }
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
-async fn pi_set_thinking(level: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "set_thinking_level", "level": level })).await?;
+async fn pi_set_thinking(level: String, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    *pool.default_thinking.lock().await = Some(level.clone());
+    let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
+    for inst in &insts {
+        let _ = inst_request(inst, serde_json::json!({ "type": "set_thinking_level", "level": level })).await;
+    }
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+#[tauri::command]
+async fn pi_compact(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "compact" })).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_compact(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "compact" })).await?;
-    Ok(r)
-}
-
-#[tauri::command]
-async fn pi_export(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "export_html" })).await?;
+async fn pi_export(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "export_html" })).await?;
     Ok(r.pointer("/data").cloned().unwrap_or(Value::Null))
 }
 
 #[tauri::command]
-async fn pi_set_cwd(cwd: String, app: AppHandle, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    pi_spawn(Some(cwd), app, state).await
-}
-
-#[tauri::command]
-async fn pi_set_name(name: String, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "set_session_name", "name": name })).await?;
+async fn pi_set_name(cwd: String, session: Option<String>, name: String, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "set_session_name", "name": name })).await?;
     Ok(r)
 }
 
 #[tauri::command]
-async fn pi_ui_response(id: String, payload: Value, state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
+async fn pi_ui_response(cwd: String, session: Option<String>, id: String, payload: Value, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let mut cmd = serde_json::json!({ "type": "extension_ui_response", "id": id });
     if let Value::Object(map) = payload {
         if let Value::Object(cmd_map) = &mut cmd {
@@ -350,13 +580,15 @@ async fn pi_ui_response(id: String, payload: Value, state: State<'_, Arc<PiManag
             }
         }
     }
-    fire(&state, cmd).await?;
+    let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
+    fire_inst(&inst, cmd).await?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
-async fn pi_list_sessions(state: State<'_, Arc<PiManager>>) -> Result<Value, String> {
-    let r = request(&state, serde_json::json!({ "type": "get_state" })).await?;
+async fn pi_list_sessions(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
     let active = r.pointer("/data/sessionFile").and_then(Value::as_str).map(String::from);
     // Respect the harness' actual session directory, including custom settings.
     let dir = active.as_ref().and_then(|p| PathBuf::from(p).parent().map(|p| p.to_path_buf()));
@@ -481,6 +713,28 @@ fn parse_session_preview(path: &PathBuf) -> (String, Option<String>, usize) {
 mod tests {
     use super::*;
     #[test]
+    fn sweep_plan_reaps_expired_then_oldest_idle_never_streaming() {
+        let now = Instant::now();
+        let ago = |s: u64| now - Duration::from_secs(s);
+        let states = vec![
+            (1, false, ago(2000)), // expired idle
+            (2, true, ago(2000)),  // streaming even if old: immortal
+            (3, false, ago(10)),
+            (4, false, ago(20)),
+            (5, false, ago(30)),
+        ];
+        let mut kill = sweep_plan(&states, now, 6, Duration::from_secs(900));
+        kill.sort_unstable();
+        assert_eq!(kill, vec![1]);
+        let mut kill = sweep_plan(&states, now, 2, Duration::from_secs(900));
+        kill.sort_unstable();
+        // expired 1 plus oldest idle (5, then 4) down to cap 2 (2 streaming + 3)
+        assert_eq!(kill, vec![1, 4, 5]);
+        // streaming alone past the cap still overflows rather than killing work
+        let states = vec![(1, true, ago(1)), (2, true, ago(1))];
+        assert!(sweep_plan(&states, now, 1, Duration::from_secs(900)).is_empty());
+    }
+    #[test]
     fn rejection_is_an_error() {
         assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
@@ -507,19 +761,17 @@ mod tests {
 }
 
 fn main() {
-    let manager = Arc::new(PiManager::new());
+    let pool = Arc::new(Pool::new());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(manager)
+        .manage(pool)
         .invoke_handler(tauri::generate_handler![
-            pi_spawn,
             pi_prompt,
             pi_steer,
             pi_follow_up,
             pi_clear_queue,
             pi_abort,
-            pi_new_session,
-            pi_switch_session,
+            pi_new_chat,
             pi_get_messages,
             pi_get_state,
             pi_get_stats,
@@ -528,7 +780,6 @@ fn main() {
             pi_set_thinking,
             pi_compact,
             pi_export,
-            pi_set_cwd,
             pi_set_name,
             pi_ui_response,
             pi_list_sessions,
