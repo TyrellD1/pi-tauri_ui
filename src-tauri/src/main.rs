@@ -577,6 +577,15 @@ async fn pi_get_stats(cwd: String, session: Option<String>, app: AppHandle, pool
 }
 
 #[tauri::command]
+async fn pi_get_commands(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // Skills (+ prompt templates / extension commands) differ per project,
+    // so this is scoped like everything else; the UI caches per cwd.
+    let inst = ensure(&app, &pool, &cwd, session, false).await?;
+    let r = inst_request(&inst, serde_json::json!({ "type": "get_commands" })).await?;
+    Ok(serde_json::json!({ "commands": r.pointer("/data/commands").cloned().unwrap_or(Value::Null) }))
+}
+
+#[tauri::command]
 async fn pi_get_models(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
     let models_r = inst_request(&inst, serde_json::json!({ "type": "get_available_models" })).await?;
@@ -841,6 +850,7 @@ fn main() {
             pi_get_messages,
             pi_get_state,
             pi_get_stats,
+            pi_get_commands,
             pi_get_models,
             pi_set_model,
             pi_set_thinking,

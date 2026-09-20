@@ -1417,7 +1417,7 @@ async function refreshStats() {
 // ---------- send / steer / follow-up / stop ----------
 function takeDraft(): Draft {
   const d = { text: inputEl.value.trim(), images: [...pendingImages] };
-  inputEl.value = ""; pendingImages = []; saveDraft(); renderAttachments(); autosize(); updateSendState(); return d;
+  inputEl.value = ""; pendingImages = []; saveDraft(); renderAttachments(); autosize(); updateSendState(); hideSkillPop(); return d;
 }
 async function retrySend(f: FailedSend) {
   if (!f || f.owner !== sessKey() || streaming || stopping || booting || bootError || sendInFlight) return;
@@ -1533,8 +1533,8 @@ async function openSession(project: string, path: string | null) {
   try {
     await refreshState();
     if (activePath === null) throw new Error("pi returned no session");
-    clearRunScope(true); restoreDraft();
-    await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshStats();
+    clearRunScope(true); restoreDraft(); updateSkillPop();
+    await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshCommands(); await refreshStats();
     expandedProjects.add(project); saveExpanded();
     await refreshAllProjects();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
@@ -1960,9 +1960,112 @@ composerWrap.addEventListener("drop", (e) => {
   }
 });
 
+// ---------- skills autocomplete ($ or / anywhere, inserts canonical /skill:name) ----------
+interface SkillCmd { name: string; description?: string; location?: string; source?: string }
+const commandCache = new Map<string, SkillCmd[]>();
+async function refreshCommands() {
+  if (commandCache.has(cwd)) return;
+  try {
+    const r = await invokeScoped<{ commands: SkillCmd[] }>("pi_get_commands");
+    const all = Array.isArray(r.commands) ? r.commands : [];
+    commandCache.set(cwd, all.filter((c) => c && typeof c.name === "string" && c.source === "skill"));
+  } catch {
+    // Popup stays hidden; retried on next chat open.
+  }
+}
+const skillPopEl = $("skill-pop");
+let skillMatches: SkillCmd[] = [];
+let skillFocus = 0;
+let skillAnchor = -1;
+let skillSig = "";
+function skillPopOpen(): boolean {
+  return !skillPopEl.classList.contains("hidden");
+}
+function hideSkillPop() {
+  skillPopEl.classList.add("hidden");
+  skillPopEl.replaceChildren();
+  skillMatches = []; skillFocus = 0; skillAnchor = -1; skillSig = "";
+}
+function skillTrigger(): { start: number; query: string } | null {
+  const caret = inputEl.selectionStart ?? inputEl.value.length;
+  const m = inputEl.value.slice(0, caret).match(/(^|[\s(])([/$])([\w:+-]*)$/);
+  if (!m) return null;
+  return { start: caret - m[3].length - 1, query: m[3] };
+}
+function updateSkillPop() {
+  const trig = skillTrigger();
+  const skills = commandCache.get(cwd) ?? [];
+  if (!trig || skills.length === 0) { hideSkillPop(); return; }
+  const sig = `${trig.start}:${trig.query}`;
+  if (sig === skillSig && skillPopOpen()) return;
+  skillSig = sig;
+  const q = trig.query.toLowerCase();
+  const bare = (n: string) => (n.startsWith("skill:") ? n.slice(6) : n).toLowerCase();
+  const rank = (s: SkillCmd) => {
+    const n = bare(s.name);
+    if (!q) return 0;
+    if (n.startsWith(q)) return 0;
+    if (n.includes(q)) return 1;
+    return 2;
+  };
+  const scored = skills
+    .filter((s) => !q || bare(s.name).includes(q) || (s.description ?? "").toLowerCase().includes(q))
+    .sort((a, b) => rank(a) - rank(b));
+  if (scored.length === 0) { hideSkillPop(); return; }
+  skillMatches = scored; skillFocus = 0; skillAnchor = trig.start;
+  renderSkillPop();
+}
+function renderSkillPop() {
+  skillPopEl.replaceChildren();
+  skillMatches.forEach((s, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "menu-item" + (i === skillFocus ? " focused" : "");
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(i === skillFocus));
+    const name = document.createElement("span");
+    name.className = "s-name";
+    name.textContent = s.name.startsWith("skill:") ? `/${s.name}` : `/skill:${s.name}`;
+    b.appendChild(name);
+    const sub = s.description || s.location;
+    if (sub) {
+      const d = document.createElement("span");
+      d.className = "s-desc";
+      d.textContent = s.description && s.location ? `${s.description} · ${s.location}` : sub;
+      b.appendChild(d);
+    }
+    b.addEventListener("mousedown", (e) => e.preventDefault());
+    b.addEventListener("click", () => { skillFocus = i; acceptSkill(); });
+    skillPopEl.appendChild(b);
+  });
+  skillPopEl.classList.remove("hidden");
+  skillPopEl.querySelector(".menu-item.focused")?.scrollIntoView({ block: "nearest" });
+}
+function acceptSkill() {
+  const s = skillMatches[skillFocus];
+  if (!s || skillAnchor < 0) return;
+  const caret = inputEl.selectionStart ?? inputEl.value.length;
+  const insert = `/${s.name.startsWith("skill:") ? s.name : `skill:${s.name}`} `;
+  inputEl.value = inputEl.value.slice(0, skillAnchor) + insert + inputEl.value.slice(caret);
+  const pos = skillAnchor + insert.length;
+  inputEl.selectionStart = inputEl.selectionEnd = pos;
+  hideSkillPop(); saveDraft(); autosize(); updateSendState(); inputEl.focus();
+}
+inputEl.addEventListener("input", updateSkillPop);
+inputEl.addEventListener("click", updateSkillPop);
+inputEl.addEventListener("keyup", updateSkillPop);
+document.addEventListener("pointerdown", (e) => {
+  if (skillPopOpen() && !(e.target as HTMLElement).closest("#skill-pop") && e.target !== inputEl) hideSkillPop();
+});
 inputEl.addEventListener("keydown", (e) => {
   // IME composition: Enter confirms the composition, never sends or stops.
   if ((e as unknown as { isComposing?: boolean }).isComposing || e.keyCode === 229) return;
+  if (skillPopOpen()) {
+    if (e.key === "ArrowDown") { e.preventDefault(); skillFocus = (skillFocus + 1) % skillMatches.length; renderSkillPop(); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); skillFocus = (skillFocus - 1 + skillMatches.length) % skillMatches.length; renderSkillPop(); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); acceptSkill(); return; }
+    if (e.key === "Escape") { e.preventDefault(); hideSkillPop(); return; }
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     if (streaming) {
@@ -2140,8 +2243,8 @@ async function boot(_respawn = false): Promise<void> {
       if (gen !== bootGen) return;
       clearRunScope(true); await refreshState();
       if (gen !== bootGen) return;
-      booting = false; restoreDraft();
-      await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshStats();
+      booting = false; restoreDraft(); updateSkillPop();
+      await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshCommands(); await refreshStats();
       if (gen !== bootGen) return;
       hideConnError(); renderSettled(); inputEl.focus();
     } catch (e) {

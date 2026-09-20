@@ -68,6 +68,7 @@ export function installPreview() {
       if(cmd === 'pi_list_sessions') return {sessions:previewSessions(),active:path};
       if(cmd === 'pi_all_projects') return {projects:[{slug:'--projects-pi-tauri_ui--',cwd,latest:Date.now(),sessions:previewSessions()}]};
       if(cmd === 'pi_get_models') return {models:[{provider:'opencode-go',id:'muse-spark-1.3-contributor'},{provider:'anthropic',id:'claude-sonnet-4'}],current:'opencode-go/muse-spark-1.3-contributor'};
+      if(cmd === 'pi_get_commands') return {commands:[{name:'skill:image-gen',description:'Generate images from a prompt',source:'skill',location:'user'},{name:'skill:improve-prompt',description:'Refine a rough prompt',source:'skill',location:'project'}]};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
       if(cmd === 'pi_new_chat') { path=`/preview/new-${++nextId}.jsonl`; resetData(); return {success:true,path}; }
       if(cmd === 'pi_prompt' || cmd === 'pi_steer' || cmd === 'pi_follow_up') {
@@ -176,6 +177,11 @@ export function installPreview() {
       check('returning restores attachment-only draft',$('attach-strip').querySelectorAll('img').length===1);
       $('btn-send').click();await sleep(60);finish();await sleep(80);
       check('attachment-only message reconciles once',$('messages-inner').querySelectorAll('.user-block img').length===1);
+      type('$image');await sleep(80);
+      check('skill popup lists matches',$('skill-pop')?.querySelectorAll('.menu-item').length===1);
+      input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(30);
+      check('skill inserts canonical name',input.value.includes('/skill:image-gen'));
+      check('skill popup closes on accept',$('skill-pop').classList.contains('hidden'));
       type('saved with first chat');const firstPath=path;$('btn-new').click();await sleep(80);
       check('new chat has its own draft',input.value==='');
       // Navigation through real Settings needs no respawn: one scoped state

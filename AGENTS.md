@@ -28,7 +28,7 @@
 ### 3. Pi integration = exact CLI harness via RPC
 - Backend spawns `pi --mode rpc` from the user's chosen `cwd` with the same flags/settings as terminal `pi`.
 - Protocol: JSONL over stdin/stdout, `\n` delimited, optional `\r` strip. See `~/.pi/agent/notes/2026-09-18-pi-permissions-ui-rpc.md`.
-- Must implement: `prompt` / `steer` / `follow_up` / `abort`, render `message_update` (`text_delta`, `thinking_delta`, `toolcall_*`), `tool_execution_*`, `agent_settled`, sessions (`get_messages`, `get_state`, `new_session`, `switch_session`), extension dialogs (`extension_ui_request` → `extension_ui_response` for `select`/`confirm`/`input`/`editor`).
+- Must implement: `prompt` / `steer` / `follow_up` / `abort`, render `message_update` (`text_delta`, `thinking_delta`, `toolcall_*`), `tool_execution_*`, `agent_settled`, sessions (`get_messages`, `get_state`, `new_session`, `switch_session`), `get_commands` (skills autocomplete, cached per cwd), extension dialogs (`extension_ui_request` → `extension_ui_response` for `select`/`confirm`/`input`/`editor`).
 - Sessions are cwd-bound. Every command carries its scope (cwd + optional session file); the pool routes to the process holding that session, spawning (and switching/new_session inside it) on demand. Switching chats or folders never disturbs running turns — true background runs. Events are tagged per chat; dialogs/queue/abort look up live processes only and fail instead of spawning strangers. `set_model`/`set_thinking` fan out to all live processes and become spawn defaults. Never guess paths — use `get_state.sessionFile`.
 
 ### 4. Engineering habits
