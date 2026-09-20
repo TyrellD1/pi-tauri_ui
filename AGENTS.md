@@ -20,7 +20,7 @@
   - CSS animations: `transform` + `opacity` only. No `backdrop-filter` over scrolling lists. No blur over large areas.
   - Cap DOM nodes: virtualize or window chat lists >200 items, truncate tool output at 200 lines with "show full" on demand, collapse thinking by default.
   - Debounce search inputs (150ms), throttle autoscroll with `requestAnimationFrame`, use `IntersectionObserver` for code-block highlighting (lazy).
-  - Rust backend: single long-lived `pi --mode rpc` child process. Line-buffered JSONL split on `\n` only (never Node `readline` semantics). Reuse buffers, avoid cloning large payloads. Emit Tauri events, don't log hot paths.
+  - Rust backend: a small pool of `pi --mode rpc` processes, one per live chat (cap 6, 15-min idle reap, streaming runs are immortal). Reaping is lazy on pool access — no timers, idle = 0% CPU. Line-buffered JSONL split on `\n` only (never Node `readline` semantics). Reuse buffers, avoid cloning large payloads. Emit Tauri events, don't log hot paths.
   - No telemetry, no auto-updater polling, no background timers. Idle = 0% CPU.
   - Bundle: no images, no fonts, inline SVG icons only. Target <300KB frontend JS.
 - Measure before adding: if a dependency adds >10KB or a timer, justify it in the PR/commit message.
@@ -29,7 +29,7 @@
 - Backend spawns `pi --mode rpc` from the user's chosen `cwd` with the same flags/settings as terminal `pi`.
 - Protocol: JSONL over stdin/stdout, `\n` delimited, optional `\r` strip. See `~/.pi/agent/notes/2026-09-18-pi-permissions-ui-rpc.md`.
 - Must implement: `prompt` / `steer` / `follow_up` / `abort`, render `message_update` (`text_delta`, `thinking_delta`, `toolcall_*`), `tool_execution_*`, `agent_settled`, sessions (`get_messages`, `get_state`, `new_session`, `switch_session`), extension dialogs (`extension_ui_request` → `extension_ui_response` for `select`/`confirm`/`input`/`editor`).
-- Sessions are cwd-bound. Switching cwd = respawn RPC process. Never guess paths — use `get_state.sessionFile`.
+- Sessions are cwd-bound. Every command carries its scope (cwd + optional session file); the pool routes to the process holding that session, spawning (and switching/new_session inside it) on demand. Switching chats or folders never disturbs running turns — true background runs. Events are tagged per chat; dialogs/queue/abort look up live processes only and fail instead of spawning strangers. `set_model`/`set_thinking` fan out to all live processes and become spawn defaults. Never guess paths — use `get_state.sessionFile`.
 
 ### 4. Engineering habits
 - Commit often. Small, working increments. `gh` cli for repo ops.

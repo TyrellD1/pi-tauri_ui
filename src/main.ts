@@ -387,7 +387,7 @@ function openSettings() {
     inp.value = cwd;
     const hint = document.createElement("p");
     hint.className = "muted";
-    hint.textContent = "Changing folders restarts pi and shows that folder's chats. Drafts stay with their original chat.";
+    hint.textContent = "Switches to that folder's chats. Running chats keep running. Drafts stay with their original chat.";
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const c = document.createElement("button");
@@ -440,7 +440,7 @@ function openRename() {
       close();
       if (!name) return;
       try {
-        await invokeChecked("pi_set_name", { name });
+        await invokeScoped("pi_set_name", { name });
         await refreshState();
         await refreshSessions();
       } catch (e) {
@@ -466,8 +466,8 @@ async function openSessionDetails() {
     box.appendChild(p);
     (async () => {
       try {
-        const st = (await invokeChecked("pi_get_state")) as Record<string, unknown>;
-        const stats = (await invokeChecked("pi_get_stats")) as Record<string, unknown>;
+        const st = (await invokeScoped("pi_get_state")) as Record<string, unknown>;
+        const stats = (await invokeScoped("pi_get_stats")) as Record<string, unknown>;
         p.remove();
         const grid = document.createElement("div");
         grid.className = "stat-grid";
@@ -677,26 +677,7 @@ function removeProject(project: string) {
 }
 
 async function openChat(project: string, path: string) {
-  if (project === cwd) {
-    await switchSession(path);
-    return;
-  }
-  if (navigating || booting || sendInFlight) {
-    if (sendInFlight) notify({ text: "Sending your message — one moment, then click again." });
-    return;
-  }
-  if (dialogs.size) {
-    notify({ text: "Answer the pending request before changing chats or folders." });
-    return;
-  }
-  if (streaming) await stopRunForSwitch();
-  saveDraft();
-  await setCwd(project);
-  if (cwd !== project) return;
-  expandedProjects.add(project);
-  saveExpanded();
-  await switchSession(path);
-  await refreshAllProjects();
+  await openSession(project, path);
 }
 
 function chatMatches(s: SessionInfo, q: string): boolean {
@@ -1210,6 +1191,18 @@ async function invokeChecked<T>(cmd: string, args?: Record<string, unknown>): Pr
   return r;
 }
 
+// Every command is routed to the process holding a chat: an explicit session
+// override while navigating, otherwise the visible chat (activePath, or the
+// cwd default when the chat has no session file yet).
+let targetScope: { cwd: string; session: string | null } | null = null;
+function visibleScope(): { cwd: string; session: string | null } {
+  if (targetScope) return targetScope;
+  return { cwd, session: activePath };
+}
+async function invokeScoped<T>(cmd: string, params: Record<string, unknown> = {}): Promise<T> {
+  return invokeChecked<T>(cmd, { ...params, ...visibleScope() });
+}
+
 function renderStatus() {
   let label: string;
   if (booting) label = "Connecting…";
@@ -1261,7 +1254,6 @@ function updateSendState() {
 // the user has switched away (pi aborts the turn on switch; its leftover
 // events must never render into the visible chat). runningSet drives the
 // pulsing blue dots in the sidebar.
-let streamOwner: string | null = null;
 const runningSet = new Set<string>();
 function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
 function clearRunScope(preserveDialogs = false) {
@@ -1282,7 +1274,7 @@ function applyState(st: Record<string, unknown>) {
 }
 async function refreshState() {
   const gen = bootGen;
-  const st = await invokeChecked<Record<string, unknown>>("pi_get_state");
+  const st = await invokeScoped<Record<string, unknown>>("pi_get_state");
   if (gen !== bootGen) return;
   applyState(st);
 }
@@ -1303,7 +1295,7 @@ function reconcileSend() {
 async function refreshMessages() {
   const gen = bootGen, rev = revision;
   try {
-    const res = await invokeChecked<{messages: AgentMessage[]}>("pi_get_messages");
+    const res = await invokeScoped<{messages: AgentMessage[]}>("pi_get_messages");
     if (gen !== bootGen || rev !== revision) return;
     conversation.reset(res.messages ?? []); messages = conversation.messages;
     reconcileSend(); chatTitle.textContent = activeName || deriveTitle() || "New chat"; renderSettled();
@@ -1314,7 +1306,7 @@ async function refreshMessages() {
 async function refreshSessions() {
   const gen = bootGen;
   try {
-    const res = await invokeChecked<{sessions: SessionInfo[]}>("pi_list_sessions");
+    const res = await invokeScoped<{sessions: SessionInfo[]}>("pi_list_sessions");
     if (gen !== bootGen) return;
     sessionsErrShown = false; sessions = res.sessions ?? [];
     projectChats.set(cwd, sessions);
@@ -1327,7 +1319,7 @@ async function refreshSessions() {
 async function refreshModels() {
   const gen = bootGen;
   try {
-    const res = (await invokeChecked("pi_get_models")) as { models: { id: string; provider: string }[]; current: string | null };
+    const res = (await invokeScoped("pi_get_models")) as { models: { id: string; provider: string }[]; current: string | null };
     if (gen !== bootGen) return;
     const cur = modelSelect.value;
     modelSelect.innerHTML = "";
@@ -1370,7 +1362,7 @@ async function refreshModels() {
 async function refreshStats() {
   const gen = bootGen;
   try {
-    const s = (await invokeChecked("pi_get_stats")) as {
+    const s = (await invokeScoped("pi_get_stats")) as {
       tokens?: { input: number; output: number; total: number };
       cost?: number;
       contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
@@ -1415,16 +1407,16 @@ async function retrySend(f: FailedSend) {
 async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
   const owner = sessKey(), gen = bootGen, id = newClientId(), startIndex = messages.length;
   sendInFlight = id;
-  if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; streamOwner = owner; setBusy(true); renderSettled(); }
+  if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; setBusy(true); renderSettled(); }
   updateSendState();
   try {
-    const r = await invokeChecked<{accepted?: boolean; error?: string}>(`pi_${kind}`, { message: d.text, images: d.images.map(im => ({ data: im.data, mimeType: im.mimeType })) });
+    const r = await invokeScoped<{accepted?: boolean; error?: string}>(`pi_${kind}`, { message: d.text, images: d.images.map(im => ({ data: im.data, mimeType: im.mimeType })) });
     if (r?.accepted === false) throw new Error(r.error ?? "Message rejected");
     if (gen !== bootGen || owner !== sessKey()) return;
     // Commands handled by extensions may produce no user message or agent run.
     if (kind === "prompt") {
       let st: Record<string, unknown>;
-      try { st = await invokeChecked<Record<string, unknown>>("pi_get_state"); }
+      try { st = await invokeScoped<Record<string, unknown>>("pi_get_state"); }
       catch { return; } // Acceptance already succeeded; never offer a duplicate send.
       if (gen !== bootGen) return;
       if (!st.isStreaming && pendingSend?.id === id) { pendingSend = null; setBusy(false); await refreshMessages(); }
@@ -1455,22 +1447,12 @@ async function doFollowUp() { if (!canSubmit()) return; await submit(takeDraft()
 // anyway (verified: stop=aborted), so stop it explicitly first and navigate
 // immediately. The run's settle arrives as a foreign event and only touches
 // the sidebar. No confirm modal — switching must feel instant.
-async function stopRunForSwitch() {
-  if (!streaming) return;
-  stopping = true; updateSendState();
-  try { await invokeChecked("pi_abort"); } catch { /* the settle still arrives; keep moving */ }
-  if (pendingSend && pendingSend.owner === streamOwner) pendingSend = null;
-  queue = { steering: [], followUp: [] }; renderQueue();
-  // NOTE: streamOwner is intentionally kept until the foreign settle lands.
-  setBusy(false); stopping = false; updateSendState();
-  notify({ text: "Stopped the running turn to switch chats." });
-}
 async function doAbort() {
   if (!streaming || stopping) return;
   stopping = true;
   updateSendState();
   try {
-    await invokeChecked("pi_abort");
+    await invokeScoped("pi_abort");
     // actual settle arrives via agent_settled; Stopping… stays until then
   } catch (e) {
     stopping = false;
@@ -1488,7 +1470,7 @@ async function doAbort() {
 
 async function doClearQueue() {
   try {
-    await invokeChecked("pi_clear_queue");
+    await invokeScoped("pi_clear_queue");
   } catch (e) {
     notify({ text: `Couldn't clear queue: ${String(e)}`, kind: "error", sticky: true, details: String(e) });
   }
@@ -1516,33 +1498,50 @@ function renderQueue() {
   queueBar.appendChild(clear);
 }
 
-async function navigate(command: string, args?: Record<string, unknown>) {
-  if (navigating || booting || sendInFlight) return;
+// Opening a chat never touches other chats' processes: the backend routes
+// the scope to the right process (spawning/switching inside it) and returns
+// that session as truth. Running turns elsewhere keep streaming.
+async function openSession(project: string, path: string | null) {
+  if (navigating || booting || sendInFlight) {
+    if (sendInFlight) notify({ text: "Sending your message — one moment, then click again." });
+    return;
+  }
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
-  if (streaming) await stopRunForSwitch();
+  if (path !== null && project === cwd && path === activePath) return;
   navigating = true; saveDraft(); ++bootGen; updateSendState();
-  let changed = false;
+  targetScope = { cwd: project, session: path };
   try {
-    const r = await invokeChecked<{data?: {cancelled?: boolean}}>(command, args);
-    if (r?.data?.cancelled) throw new Error("The session change was cancelled by pi.");
-    changed = true;
-    await refreshState(); clearRunScope(true); restoreDraft();
+    await refreshState();
+    if (activePath === null) throw new Error("pi returned no session");
+    clearRunScope(true); restoreDraft();
     await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshStats();
+    expandedProjects.add(project); saveExpanded();
+    await refreshAllProjects();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
   } catch (e) {
-    if (changed) { bootError = `Couldn't load the selected workspace: ${String(e)}`; showConnError("Workspace unavailable", () => boot(true)); }
-    notify({ text: `Couldn't change workspace: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => navigate(command, args) });
-  } finally { navigating = false; updateSendState(); if (!bootError && !dialogs.size) inputEl.focus(); }
+    notify({ text: `Couldn't open chat: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openSession(project, path) });
+  } finally { targetScope = null; navigating = false; updateSendState(); if (!bootError && !dialogs.size) inputEl.focus(); }
 }
-async function newChat() { await navigate("pi_new_session"); }
-async function switchSession(path: string) { if (path !== activePath) await navigate("pi_switch_session", {path}); }
-async function setCwd(ncwd: string) { await navigate("pi_set_cwd", {cwd: ncwd}); }
+async function newChat() {
+  if (navigating || booting || sendInFlight) return;
+  if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
+  let path: string;
+  try {
+    const r = await invokeChecked<{ path: string }>("pi_new_chat", { cwd });
+    path = r.path;
+  } catch (e) {
+    notify({ text: `Couldn't start a new chat: ${String(e)}`, kind: "error", sticky: true });
+    return;
+  }
+  await openSession(cwd, path);
+}
+async function setCwd(ncwd: string) { await openSession(ncwd, null); }
 
 async function doCompact() {
   if (streaming || booting || navigating) { notify({text: "Wait for the current turn to finish before compacting."}); return; }
   try {
     statusLine.textContent = activityLabel("compacting");
-    await invokeChecked("pi_compact");
+    await invokeScoped("pi_compact");
     await refreshMessages();
     notify({ text: "Context compacted." });
   } catch (e) {
@@ -1554,7 +1553,7 @@ async function doCompact() {
 
 async function doExport() {
   try {
-    const r = (await invokeChecked("pi_export")) as { path: string };
+    const r = (await invokeScoped("pi_export")) as { path: string };
     notify({ text: `Exported to ${r.path}` });
   } catch (e) {
     notify({ text: `Export failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: doExport, details: String(e) });
@@ -1723,7 +1722,7 @@ async function respondUi(id: string, payload: Record<string, unknown>) {
   const st = d.card.querySelector<HTMLElement>(".dialog-state")!;
   st.className = "dialog-state pending"; st.textContent = "Responding…";
   try {
-    await invokeChecked("pi_ui_response", {id, payload});
+    await invokeScoped("pi_ui_response", {id, payload});
     if (dialogs.get(id) !== d) return;
     dialogs.delete(id); d.card.remove(); syncDialogs(); renderStatus();
     if (!dialogs.size) inputEl.focus();
@@ -1737,31 +1736,73 @@ async function respondUi(id: string, payload: Record<string, unknown>) {
 }
 
 // ---------- events ----------
+// Each backend event is tagged with the owning chat (instance/session/cwd).
+// Row keys match the sidebar (`${project}:${path}`); chats with no session
+// file yet use a cwd key that matches no row.
+function eventRowKey(p: PiEvent): string | null {
+  const ecwd = typeof p.cwd === "string" ? p.cwd : null;
+  if (!ecwd) return null;
+  const esess = typeof p.session === "string" ? p.session : null;
+  return esess ? `${ecwd}:${esess}` : `cwdkey:${ecwd}`;
+}
+function visibleKey(): string {
+  return activePath ? `${cwd}:${activePath}` : `cwdkey:${cwd}`;
+}
+function sessionLabel(key: string): string | null {
+  const sep = key.indexOf(":");
+  if (sep < 0) return null;
+  const c = key.slice(0, sep), path = key.slice(sep + 1);
+  const list = projectChats.get(c) ?? [];
+  const s = list.find((x) => x.path === path);
+  const title = s ? s.name || s.preview.slice(0, 42) : path.split("/").filter(Boolean).pop() ?? path;
+  const folder = c.split("/").filter(Boolean).pop() ?? c;
+  return `${title} (${folder})`;
+}
 async function handleEvent(p: PiEvent) {
   const t = p.type;
   if (t === "process_disconnected") {
-    ++bootGen; booting = false; setBusy(false); streamOwner = null; runningSet.clear(); bootError = "pi disconnected. Reconnect to continue; your draft is kept.";
+    ++bootGen; booting = false; setBusy(false); runningSet.clear(); bootError = "pi disconnected. Reconnect to continue; your draft is kept.";
     saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
     showConnError("pi disconnected", () => boot(true)); return;
   }
+  if (t === "instance_disconnected") {
+    // One chat's process died (crash or lazy reaping). Visible chat: reconnect
+    // path. Background chat: note it; reopening respawns transparently.
+    const key = eventRowKey(p);
+    if (key !== null && key === visibleKey()) {
+      ++bootGen; booting = false; setBusy(false); runningSet.clear(); bootError = "pi process for this chat exited. Reconnect to continue; your draft is kept.";
+      saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
+      showConnError("chat process exited", () => openSession(cwd, activePath)); return;
+    }
+    if (key !== null) runningSet.delete(key);
+    notify({ text: "A background chat's process exited. Reopen it to continue." });
+    await refreshAllProjects(); return;
+  }
   if (t === "extension_ui_request") { showExtensionDialog(p); return; }
+  // Route by owning chat: untagged events (preview fixtures) belong here.
+  const key = eventRowKey(p);
+  const isVis = key === null || key === visibleKey();
   if (t === "queue_update") {
+    if (!isVis) return;
     queue = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] }; renderQueue(); return;
   }
-  const foreign = streamOwner !== null && streamOwner !== sessKey();
-  if (foreign) {
-    // Leftover events from a run we switched away from. Never render these
-    // into the visible chat; only track the sidebar dot and refresh lists.
-    if (t === "agent_start") { runningSet.add(streamOwner!); renderProjects(); return; }
-    if (t === "agent_settled") {
-      runningSet.delete(streamOwner!); streamOwner = null;
-      setBusy(false);
-      if (pendingSend && pendingSend.owner !== sessKey()) pendingSend = null;
+  if (t === "agent_start") {
+    if (key !== null) runningSet.add(key);
+    if (isVis) { setBusy(true); streamActivity = "thinking"; }
+    else { await refreshAllProjects(); }
+    renderProjects(); return;
+  }
+  if (!isVis) {
+    // Another chat's live events: never render into this view. Its settle is
+    // handled below; everything else only keeps the sidebar dot truthful.
+    if (t === "agent_settled" && key !== null) {
+      runningSet.delete(key);
       await refreshAllProjects();
+      const done = sessionLabel(key);
+      if (done) notify({ text: `Finished in ${done}.` });
     }
     return;
   }
-  if (t === "agent_start") { setBusy(true); streamActivity = "thinking"; runningSet.add(streamOwner ?? sessKey()); renderProjects(); }
   if (t.startsWith("message_") || t.startsWith("tool_execution_")) {
     ++revision; conversation.ingest(p); messages = conversation.messages; reconcileSend();
     chatTitle.textContent = activeName || deriveTitle() || "New chat";
@@ -1771,8 +1812,7 @@ async function handleEvent(p: PiEvent) {
     renderStatus(); queueStreamUpdate();
   }
   if (t === "agent_settled") {
-    if (streamOwner) runningSet.delete(streamOwner);
-    streamOwner = null;
+    if (key !== null) runningSet.delete(key);
     setBusy(false); pendingSend = null; renderSettled();
     // Keep live content visible while authoritative history is fetched.
     await refreshMessages(); await refreshAllProjects(); await refreshStats();
@@ -2067,6 +2107,7 @@ document.addEventListener("keydown", (e) => {
 // ---------- boot ----------
 let bootPromise: Promise<void> | null = null;
 async function boot(_respawn = false): Promise<void> {
+  void _respawn;
   if (bootPromise) return bootPromise;
   bootPromise = (async () => {
     const gen = ++bootGen; booting = true; bootError = null; navigating = true;
@@ -2074,10 +2115,9 @@ async function boot(_respawn = false): Promise<void> {
     updateSendState(); hideConnError(); renderSettled();
     try {
       await initEvents();
-      const r = await invokeChecked<{cwd: string}>("pi_spawn", {cwd: cwd || null});
+      // No explicit spawn: the first scoped command ensures the cwd's
+      // default session (spawning only if no process holds it yet).
       if (gen !== bootGen) return;
-      cwd = r.cwd;
-      if (_respawn && activePath) await invokeChecked("pi_switch_session", {path: activePath});
       clearRunScope(true); await refreshState();
       if (gen !== bootGen) return;
       booting = false; restoreDraft();

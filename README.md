@@ -37,7 +37,7 @@ npm run tauri build
 
 ## Sessions
 
-Sessions are cwd-bound (pi behavior). Switching working directory in Settings respawns the RPC process. The harness reports its session file; the UI uses that real directory. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
 
 ## Shortcuts & send contract
 

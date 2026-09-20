@@ -5,7 +5,7 @@ import { Conversation, type Message } from './conversation';
 const fixture = new Conversation();
 let listener: ((ev: {payload: unknown}) => void) | null = null;
 let cwd = '/projects/pi-tauri_ui', path = '/preview/chats/chat-0.jsonl', running = false, scenario = 'Populated';
-let nextId = 0, spawnCount = 0, listenAttempts = 0;
+let nextId = 0, listenAttempts = 0;
 let rejectNext = false, holdSend: (() => void) | null = null, holdResponse: (() => void) | null = null;
 let failNavigation = false;
 let failResponse = false, calls: {cmd: string; args?: Record<string, unknown>}[] = [];
@@ -54,16 +54,22 @@ export function installPreview() {
     },
     invoke: async (cmd, args) => {
       calls.push({cmd,args:clone(args)});
-      if(cmd === 'pi_spawn') { spawnCount++; if(args?.cwd) cwd=String(args.cwd); return {ok:true,cwd}; }
-      if(cmd === 'pi_get_state') return {cwd,sessionFile:path,sessionName:scenario === 'Populated'?'Refine the chat interface':'New chat',thinkingLevel:'xhigh',isStreaming:running,model:{provider:'opencode-go',id:'muse-spark-1.3-contributor'}};
+      if(cmd === 'pi_get_state') {
+        if(failNavigation) {failNavigation=false;return {success:false,error:'Preview session unavailable'};}
+        // Scoped routing like the real pool: an explicit session wins, a new
+        // folder presents its default, otherwise the current session holds.
+        const sp = args?.session;
+        if(typeof sp === 'string' && sp) { path=sp; }
+        else if(sp === null && typeof args?.cwd === 'string' && args.cwd !== cwd) { cwd=String(args.cwd); path=`${cwd}/new.jsonl`; resetData(); }
+        else if(typeof args?.cwd === 'string' && args.cwd) { cwd=String(args.cwd); }
+        return {cwd,sessionFile:path,sessionName:scenario === 'Populated'?'Refine the chat interface':'New chat',thinkingLevel:'xhigh',isStreaming:running,model:{provider:'opencode-go',id:'muse-spark-1.3-contributor'}};
+      }
       if(cmd === 'pi_get_messages') return {messages:clone(fixture.messages)};
       if(cmd === 'pi_list_sessions') return {sessions:previewSessions(),active:path};
       if(cmd === 'pi_all_projects') return {projects:[{slug:'--projects-pi-tauri_ui--',cwd,latest:Date.now(),sessions:previewSessions()}]};
       if(cmd === 'pi_get_models') return {models:[{provider:'opencode-go',id:'muse-spark-1.3-contributor'},{provider:'anthropic',id:'claude-sonnet-4'}],current:'opencode-go/muse-spark-1.3-contributor'};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
-      if(cmd === 'pi_new_session') { path=`/preview/new-${++nextId}.jsonl`; resetData(); return {success:true}; }
-      if(cmd === 'pi_switch_session') { if(failNavigation) {failNavigation=false;return {success:false,error:'Preview session unavailable'};} path=String(args?.path); resetData(); return {success:true}; }
-      if(cmd === 'pi_set_cwd') { spawnCount++; cwd=String(args?.cwd); path=`${cwd}/new.jsonl`; resetData(); return {ok:true,cwd}; }
+      if(cmd === 'pi_new_chat') { path=`/preview/new-${++nextId}.jsonl`; resetData(); return {success:true,path}; }
       if(cmd === 'pi_prompt' || cmd === 'pi_steer' || cmd === 'pi_follow_up') {
         if(rejectNext) { rejectNext=false; await new Promise<void>(r=>holdSend=r); holdSend=null; return {success:false,error:'Preview rejection'}; }
         if(cmd === 'pi_prompt') accepted(String(args?.message ?? ''),(args?.images as unknown[]) ?? []);
@@ -172,10 +178,11 @@ export function installPreview() {
       check('attachment-only message reconciles once',$('messages-inner').querySelectorAll('.user-block img').length===1);
       type('saved with first chat');const firstPath=path;$('btn-new').click();await sleep(80);
       check('new chat has its own draft',input.value==='');
-      // Navigation through real Settings must spawn only once.
-      const spawns=spawnCount;$('btn-settings').click();$<HTMLInputElement>('m-cwd').value='/projects/other';
+      // Navigation through real Settings needs no respawn: one scoped state
+      // load moves folders, and no process is ever spawned to switch.
+      const routed=calls.length;$('btn-settings').click();$<HTMLInputElement>('m-cwd').value='/projects/other';
       Array.from($('modal-root').querySelectorAll('button')).find(b=>b.textContent==='Save')!.click();await sleep(100);
-      check('folder change spawns once',spawnCount===spawns+1 && cwd==='/projects/other');
+      check('folder change needs no respawn',cwd==='/projects/other' && !calls.slice(routed).some(c=>['pi_spawn','pi_set_cwd','pi_new_session','pi_switch_session'].includes(c.cmd)));
       check('session list stays bounded',$('chat-list').querySelectorAll('.chat-item').length===100);
       typeSearch('Archived keyboard review');await sleep(200);check('search reaches chat beyond 200',$('chat-list').textContent!.includes('Archived keyboard review'));
       check('session changed away from source',path!==firstPath);
