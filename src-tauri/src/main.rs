@@ -54,6 +54,7 @@ struct Pool {
     next_id: AtomicU64,
     default_model: Mutex<Option<(String, String)>>,
     default_thinking: Mutex<Option<String>>,
+    pi_bin: Mutex<Option<PathBuf>>,
 }
 
 impl Pool {
@@ -64,8 +65,58 @@ impl Pool {
             next_id: AtomicU64::new(1),
             default_model: Mutex::new(None),
             default_thinking: Mutex::new(None),
+            pi_bin: Mutex::new(None),
         }
     }
+}
+
+/// Locate the `pi` CLI. Finder/Dock launches carry a skeletal PATH (no nvm,
+/// no Homebrew), so PATH lookup alone strands /Applications installs.
+/// Resolved once per app run, then cached.
+async fn resolve_pi(pool: &Arc<Pool>) -> Result<PathBuf, String> {
+    if let Some(bin) = pool.pi_bin.lock().await.clone() {
+        return Ok(bin);
+    }
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            cands.push(dir.join("pi"));
+        }
+    }
+    if let Some(home) = dirs::home_dir() {
+        for extra in [".npm-global/bin/pi", "bin/pi"] {
+            cands.push(home.join(extra));
+        }
+        // Whatever nvm node version is (or becomes) active.
+        if let Ok(vers) = std::fs::read_dir(home.join(".nvm/versions/node")) {
+            for v in vers.flatten() {
+                cands.push(v.path().join("bin/pi"));
+            }
+        }
+    }
+    for sys in ["/opt/homebrew/bin/pi", "/usr/local/bin/pi", "/opt/local/bin/pi"] {
+        cands.push(PathBuf::from(sys));
+    }
+    for c in cands {
+        if c.is_file() {
+            *pool.pi_bin.lock().await = Some(c.clone());
+            return Ok(c);
+        }
+    }
+    // Last resort: a login shell sources nvm/rbenv-style shims (~0.5s, cached).
+    let out = tokio::process::Command::new("/bin/sh")
+        .arg("-lc")
+        .arg("command -v pi")
+        .output()
+        .await
+        .map_err(|e| format!("shell probe failed: {}", e))?;
+    let found = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let bin = PathBuf::from(&found);
+    if !found.is_empty() && bin.is_file() {
+        *pool.pi_bin.lock().await = Some(bin.clone());
+        return Ok(bin);
+    }
+    Err("couldn't find the pi CLI — install it (npm i -g @earendil-works/pi-coding-agent) or launch the app once from a terminal".to_string())
 }
 
 // ---------- helpers ----------
@@ -233,9 +284,23 @@ async fn spawn_instance(app: &AppHandle, pool: &Arc<Pool>, cwd: &str) -> Result<
     if !PathBuf::from(&target).is_dir() {
         return Err(format!("not a directory: {}", target));
     }
-    let mut child = Command::new("pi")
+    let bin = resolve_pi(pool).await?;
+    // The nvm shim is a node script (`#!/usr/bin/env node`): with Finder's
+    // skeletal PATH, `node` would not resolve either — so the shim's own
+    // directory leads the child's PATH.
+    let mut child_path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(dir) = bin.parent() {
+        let mut prefixed = std::ffi::OsString::from(dir);
+        if !child_path.is_empty() {
+            prefixed.push(":");
+            prefixed.push(&child_path);
+        }
+        child_path = prefixed;
+    }
+    let mut child = Command::new(&bin)
         .arg("--mode")
         .arg("rpc")
+        .env("PATH", child_path)
         .current_dir(&target)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
