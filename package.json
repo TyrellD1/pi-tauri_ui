@@ -11,7 +11,8 @@
     "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.11.1"
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4",

@@ -829,6 +829,7 @@ fn main() {
     let pool = Arc::new(Pool::new());
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(pool)
         .invoke_handler(tauri::generate_handler![
             pi_prompt,

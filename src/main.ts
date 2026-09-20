@@ -1,5 +1,6 @@
 import { Conversation, type Message, textOf } from "./conversation";
 import { invoke, listen } from "./tauri-shim";
+import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import {
   activityLabel,
   canSend,
@@ -623,9 +624,28 @@ function openAddProject() {
     const lab = document.createElement("label");
     lab.textContent = "Project folder";
     lab.setAttribute("for", "m-project");
+    const pathRow = document.createElement("div");
+    pathRow.className = "path-row";
     const inp = document.createElement("input");
     inp.id = "m-project";
     inp.placeholder = "/Users/you/workspace_a/projects/…";
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.textContent = "Browse…";
+    browse.title = "Choose a folder in Finder";
+    browse.onclick = async () => {
+      try {
+        const picked = await openFolderPicker({ directory: true, multiple: false, title: "Choose project folder" });
+        if (typeof picked === "string" && picked) {
+          inp.value = picked;
+          inp.focus();
+        }
+      } catch {
+        notify({ text: "Couldn't open the folder picker." });
+      }
+    };
+    pathRow.appendChild(inp);
+    pathRow.appendChild(browse);
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const c = document.createElement("button");
@@ -653,7 +673,7 @@ function openAddProject() {
     row.appendChild(s);
     box.appendChild(p);
     box.appendChild(lab);
-    box.appendChild(inp);
+    box.appendChild(pathRow);
     box.appendChild(row);
     inp.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing) s.click();
