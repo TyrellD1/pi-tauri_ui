@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plan — Per-chat connection state + manual reconnect</title>
+<style>
+  :root{
+    --page:#fafafa; --ink:#171717; --muted:#525252; --quiet:#a3a3a3;
+    --line:#e5e5e5; --surface:#ffffff; --surface-deep:#f0f0f0; --strong:#171717;
+    --radius:10px; --font:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  }
+  [data-theme="dark"]{
+    --page:#0a0a0a; --ink:#e5e5e5; --muted:#a3a3a3; --quiet:#525252;
+    --line:#262626; --surface:#171717; --surface-deep:#0f0f0f; --strong:#fafafa;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--page);color:var(--ink);font-family:var(--font);font-size:15px;line-height:1.65;margin:0}
+  .wrap{max-width:780px;margin:0 auto;padding:40px 24px 80px}
+  header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:8px}
+  h1{font-size:26px;letter-spacing:-0.02em;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13.5px;margin:0}
+  #theme-btn{border:1px solid var(--line);background:var(--surface);color:var(--ink);border-radius:8px;width:34px;height:34px;cursor:pointer;font-size:15px;flex-shrink:0}
+  h2{font-size:17px;margin:34px 0 8px;letter-spacing:-0.01em}
+  h3{font-size:14.5px;margin:20px 0 6px}
+  p,li{color:var(--ink)}
+  li{margin:4px 0}
+  .muted{color:var(--muted)}
+  code{font-family:var(--mono);font-size:13px;background:var(--surface-deep);border:1px solid var(--line);border-radius:5px;padding:1px 5px}
+  pre{font-family:var(--mono);font-size:12.5px;background:var(--surface-deep);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;overflow-x:auto;line-height:1.6}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 18px;margin:12px 0}
+  .card p{margin:6px 0;font-size:14px}
+  .tag{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:2px 10px;margin-bottom:6px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:10px 0}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  td code{white-space:nowrap}
+  .checklist{list-style:none;padding:0}
+  .checklist li{padding:7px 12px;border:1px solid var(--line);border-radius:8px;margin:6px 0;font-size:14px;background:var(--surface)}
+  footer{margin-top:44px;color:var(--quiet);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div>
+    <h1>Per-chat connection state + manual reconnect</h1>
+    <p class="sub">Implementation plan for pi-tauri_ui · item #5 of the idle-survival work · CodeG-inspired</p>
+  </div>
+  <button id="theme-btn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+</header>
+
+<h2>1. Problem</h2>
+<p>Today the connection between the UI and each <code>pi --mode rpc</code> process is <strong>implicit</strong>. There is no visible state for it and no manual recovery: if a chat's process stalls, dies, or goes deaf, the UI either spins forever or wedges a flag (<code>sendInFlight</code>, <code>navigating</code>). The only recovery the user has discovered is quitting and restarting the whole app. Items 1–4 (visible-chat reap exemption, bounded stdin writes, stuck-flag watchdog, listener re-registration) cap the damage; this plan removes the class: make connection <strong>explicit, visible, and manually recoverable per chat</strong>, the way CodeG does with its per-session status + Reconnect.</p>
+
+<h2>2. Goals / non-goals</h2>
+<div class="card"><span class="tag">Goals</span>
+<p>A user can always answer: <em>is this chat connected?</em> — from the sidebar, without opening it. Any non-connected chat offers a one-click path back that <strong>resumes</strong> (history is on disk; never restarts the conversation). Stalls surface as state with an action, never as a dead UI. Background chats report their state transitions quietly (dot + toast, as today).</p>
+</div>
+<div class="card"><span class="tag">Non-goals</span>
+<p>No heartbeat polling (event-driven only — liveness is inferred from traffic + explicit failures). No auto-retry storms (one resume attempt per user action; settings fan-out stays as-is). No change to the pool cap / reap policy beyond what 1–4 set.</p>
+</div>
+
+<h2>3. Design</h2>
+<h3>3.1 State machine (per chat)</h3>
+<pre>unknown → connecting → live ⇄ responding
+              ↓              ↓     ↓
+            dead ←──────── stale ──┘
+(resume from any non-live state returns to connecting)</pre>
+<table>
+<tr><th>State</th><th>Meaning</th><th>Source of truth</th></tr>
+<tr><td><code>unknown</code></td><td>Never contacted this run (fresh boot, unopened row)</td><td>Frontend default</td></tr>
+<tr><td><code>connecting</code></td><td>Spawn/ensure in flight</td><td>Frontend (command outstanding)</td></tr>
+<tr><td><code>live</code></td><td>Process answered recently; idle or working</td><td>Any successful command or event within N min</td></tr>
+<tr><td><code>responding</code></td><td>Run in flight (existing <code>runningSet</code>)</td><td><code>agent_start</code> → <code>agent_settled</code></td></tr>
+<tr><td><code>stale</code></td><td>No traffic for X min while chat open, or watchdog tripped</td><td>Frontend inference (timestamps only)</td></tr>
+<tr><td><code>dead</code></td><td>Process exited / retired / command failed hard</td><td><code>instance_disconnected</code>, retire, spawn failure</td></tr>
+</table>
+
+<h3>3.2 Where state lives</h3>
+<p><strong>Rust (source of truth for process facts):</strong> new <code>pi_pool_status</code> command returning <code>{instances: [{id, cwd, session, streaming, lastActiveMs, retired}]}</code> — pure snapshot, no spawning, no sweeping side effects beyond the existing lazy sweep. The existing <code>instance_disconnected</code> event already covers death; add the retire reason (<code>reaped</code> vs <code>write-stall</code> vs <code>crashed</code>) to its payload so the UI can word the recovery correctly.</p>
+<p><strong>Frontend (mirror + inference):</strong> <code>connByChat: Map&lt;rowKey, {state, since, detail?}&gt;</code>. Updated on: command success/failure (connecting → live/dead), stream events (→ responding/live), watchdog trip (→ stale), disconnect events (→ dead). Never polled; refreshed on open, on demand (status button), and on any transition event.</p>
+
+<h3>3.3 UI</h3>
+<ul>
+<li><strong>Sidebar row badge:</strong> today's blue pulsing dot means <code>responding</code>. Add quiet siblings in grayscale: hollow dot <code>stale</code>, ✕-ish or faded row <code>dead</code>, nothing for <code>live</code>/<code>unknown</code>. Blue stays reserved for "working" — the one color exception already granted.</li>
+<li><strong>Header status pill (button):</strong> for the visible chat only — <code>Live</code> / <code>Responding…</code> / <code>Stale — Reconnect</code> / <code>Disconnected — Reconnect</code>. Clicking opens a small panel: session file path, process age, last traffic, model, and the Reconnect button.</li>
+<li><strong>Failed-turn strip:</strong> classify the failure kind where known and dock the matching action under the composer: transport/timeout → <em>Retry</em>; process dead → <em>Reconnect &amp; retry</em>; model/auth rejection → <em>open Settings</em>. (Today: one generic retry card.)</li>
+<li><strong>Reconnect semantics:</strong> always resume — re-ensure the scope (respawn only if the process is actually gone), reload history from disk (free and authoritative), re-apply drafts. Never <code>new_session</code>. If the dead process had an un-settled run, its partial turn is already in the session file as <code>stop=aborted</code> and renders as today's quiet <em>Turn stopped.</em></li>
+</ul>
+
+<h3>3.4 Triggers</h3>
+<ul>
+<li><strong>Automatic:</strong> opening a <code>stale</code>/<code>dead</code> chat re-ensures (already happens via scoped commands — keep, but route through the state machine so the pill shows <code>connecting</code> instead of a bare spinner).</li>
+<li><strong>Manual:</strong> Reconnect button (header pill, row context, failed-turn strip). One attempt per click; failure returns to <code>dead</code> with the reason shown.</li>
+<li><strong>Never:</strong> background auto-reconnect loops. A dead background chat waits for the user.</li>
+</ul>
+
+<h2>4. Backend work items</h2>
+<ul class="checklist">
+<li>1. Add retire reason to <code>instance_disconnected</code> (<code>reaped</code> | <code>write-stall</code> | <code>crashed</code>).</li>
+<li>2. Add <code>pi_pool_status</code> snapshot command (no spawn, no sweep side effects).</li>
+<li>3. Confirm <code>ensure</code> failure modes are all <code>Err</code> (never hang): audit every await for a timeout — should already hold after item 2 of the 1–4 work.</li>
+<li>4. Unit tests: status snapshot shape; reason propagation.</li>
+</ul>
+
+<h2>5. Frontend work items</h2>
+<ul class="checklist">
+<li>5. <code>connByChat</code> store + transitions (command results, stream events, watchdog, disconnects).</li>
+<li>6. Sidebar badges for <code>stale</code>/<code>dead</code> (grayscale; blue stays <code>responding</code>-only).</li>
+<li>7. Header status pill button + detail panel + Reconnect wired to resume.</li>
+<li>8. Failed-turn classification strip under the composer.</li>
+<li>9. Route auto-ensure on open through the state machine (<code>connecting</code> visible).</li>
+<li>10. Preview mocks (<code>pi_pool_status</code>, reason-tagged disconnects) + regression checks: kill visible process → pill shows dead → Reconnect resumes same chat + draft.</li>
+</ul>
+
+<h2>6. Edge cases</h2>
+<ul>
+<li><strong>Sleep/wake:</strong> timers (watchdog) may fire spuriously on wake; treat the first post-wake transition as <code>stale</code>, not <code>dead</code> — one cheap command re-validates.</li>
+<li><strong>Crash mid-run:</strong> partial turn persists as <code>stop=aborted</code>; resume shows it + offers retry. Matches today's Esc/switch rendering.</li>
+<li><strong>Trust prompts (pi 0.25+):</strong> a fresh process in an untrusted folder may block on trust instead of answering RPC. Classify as its own failure kind with a "review trust" action rather than a generic timeout (CodeG built dedicated UI for this).</li>
+<li><strong>Deaf listener:</strong> if events stop but commands succeed, state inference degrades to command results; the visibility-change re-listen (item 4) stays as backstop.</li>
+<li><strong>Reaped-while-visible:</strong> impossible after item 1 (visible exempt) — listed so nobody reintroduces it.</li>
+</ul>
+
+<h2>7. Verification (no app-QA gaps this time)</h2>
+<ul>
+<li><code>kill -STOP &lt;pi-pid&gt;</code> to simulate a stalled child → send must fail into retry within ~30s, pill must show stale, Reconnect resumes.</li>
+<li><code>kill -9 &lt;pi-pid&gt;</code> mid-run → <code>instance_disconnected(crashed)</code> → dead badge + strip → Reconnect resumes with partial turn visible.</li>
+<li>15-min idle on visible chat → process alive (exemption holds); on background chat → reaped silently, reopen respawns.</li>
+<li><code>?dev=1</code> regression covers 10 (mocked kill → dead → reconnect → same chat + draft).</li>
+</ul>
+
+<h2>8. Open questions</h2>
+<ul>
+<li>Should <code>stale</code> exist as a distinct state, or is <code>live</code>-vs-<code>dead</code> with "last active Xs ago" enough? (Lean: keep it — it drives the only automatic re-validation.)</li>
+<li>Per-chat model/thinking display in the status panel — pull from <code>get_state</code> on open (cheap) or skip for v1?</li>
+<li>Toast on background <code>dead</code>, or badge-only? (Today: toast. Keep unless noisy in practice.)</li>
+</ul>
+
+<footer>pi-tauri_ui · docs/connection-state-plan.html · written 2026-09-21 · items 1–4 shipped in <code>39801ba</code></footer>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('theme-btn');
+  function paint(){ document.documentElement.setAttribute('data-theme', btn.textContent === '☀' ? 'dark' : 'light'); }
+  try {
+    var saved = localStorage.getItem('plan-theme');
+    if (saved === 'dark' || saved === 'light') {
+      document.documentElement.setAttribute('data-theme', saved);
+      btn.textContent = saved === 'dark' ? '☀' : '☾';
+    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      btn.textContent = '☀';
+    } else { btn.textContent = '☾'; }
+  } catch(e){ btn.textContent = '☾'; }
+  btn.onclick = function(){
+    var dark = document.documentElement.getAttribute('data-theme') !== 'dark';
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    btn.textContent = dark ? '☀' : '☾';
+    try { localStorage.setItem('plan-theme', dark ? 'dark' : 'light'); } catch(e){}
+  };
+})();
+</script>
+</body>
+</html>
