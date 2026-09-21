@@ -1424,9 +1424,48 @@ async function retrySend(f: FailedSend) {
   failedBySession.set(f.owner, failedSends().filter(x => x.id !== f.id));
   await submit(f, "prompt");
 }
+// Stuck-flag watchdog: if a send or navigation is still outstanding after 120s
+// with zero stream progress, fail loud into the standard retry card instead
+// of bricking the app. One-shot timer, armed only while work is in flight —
+// justification for the timer: it is the only recovery from a hung harness.
+let watchTimer: number | null = null;
+let lastProgressAt = 0;
+function pokeProgress() { lastProgressAt = Date.now(); }
+function armWatchdog() {
+  pokeProgress();
+  if (watchTimer !== null) return;
+  watchTimer = window.setTimeout(checkWatchdog, 120000);
+}
+function disarmWatchdog() {
+  if (sendInFlight === null && !navigating && watchTimer !== null) {
+    clearTimeout(watchTimer); watchTimer = null;
+  }
+}
+function checkWatchdog() {
+  watchTimer = null;
+  if (sendInFlight === null && !navigating) return;
+  if (Date.now() - lastProgressAt < 120000) { armWatchdog(); return; }
+  if (sendInFlight !== null) {
+    sendInFlight = null;
+    const p = pendingSend; pendingSend = null;
+    const owner = p?.owner ?? sessKey();
+    const list = failedBySession.get(owner) ?? [];
+    list.push({ text: p?.text ?? "", images: p?.images ?? [], id: newClientId(), owner, kind: "prompt", error: "Send timed out with no response — the chat may be stuck. Retry, or reopen the chat." });
+    failedBySession.set(owner, list);
+    setBusy(false);
+    renderSettled();
+    notify({ text: "Send timed out. Use Retry beside it; your newer draft is unchanged.", kind: "error" });
+  }
+  if (navigating) {
+    navigating = false;
+    notify({ text: "Opening the chat timed out. Try again.", kind: "error" });
+  }
+  updateSendState();
+  disarmWatchdog();
+}
 async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
   const owner = sessKey(), gen = bootGen, id = newClientId(), startIndex = messages.length;
-  sendInFlight = id;
+  sendInFlight = id; armWatchdog();
   if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; setBusy(true); renderSettled(); }
   updateSendState();
   try {
@@ -1456,6 +1495,7 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
   } finally {
     if (sendInFlight === id) sendInFlight = null;
     updateSendState();
+    disarmWatchdog();
   }
 }
 function canSubmit() { return !booting && !bootError && !navigating && !stopping && !sendInFlight && hasDraft(); }
@@ -1529,6 +1569,8 @@ async function openSession(project: string, path: string | null) {
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
   if (path !== null && project === cwd && path === activePath) return;
   navigating = true; saveDraft(); ++bootGen; updateSendState();
+  armWatchdog();
+  if (!eventsReady) await initEvents();
   targetScope = { cwd: project, session: path };
   try {
     await refreshState();
@@ -1540,7 +1582,7 @@ async function openSession(project: string, path: string | null) {
     stickToBottom = true; scrollBottom(true); inputEl.focus();
   } catch (e) {
     notify({ text: `Couldn't open chat: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openSession(project, path) });
-  } finally { targetScope = null; navigating = false; updateSendState(); if (!bootError && !dialogs.size) inputEl.focus(); }
+  } finally { targetScope = null; navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
 }
 async function newChat() {
   if (navigating || booting || sendInFlight) return;
@@ -1802,6 +1844,7 @@ async function handleEvent(p: PiEvent) {
   // Route by owning chat: untagged events (preview fixtures) belong here.
   const key = eventRowKey(p);
   const isVis = key === null || key === visibleKey();
+  if (isVis && (t === "agent_start" || t === "agent_settled" || t.startsWith("message_") || t.startsWith("tool_execution_"))) pokeProgress();
   if (t === "queue_update") {
     if (!isVis) return;
     queue = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] }; renderQueue(); return;
@@ -1846,6 +1889,11 @@ async function initEvents() {
   eventsReady = true;
 }
 window.addEventListener("pagehide", () => { unlisten?.(); unlisten = null; eventsReady = false; });
+// A webview hidden long enough can go permanently deaf (listener dropped by
+// the host with no event). Re-register on return; initEvents is idempotent.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !eventsReady) void initEvents();
+});
 
 // ---------- input ----------
 function autosize() {
@@ -2236,6 +2284,7 @@ async function boot(_respawn = false): Promise<void> {
     const gen = ++bootGen; booting = true; bootError = null; navigating = true;
     saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); visibleDialogId = null;
     updateSendState(); hideConnError(); renderSettled();
+    armWatchdog();
     try {
       await initEvents();
       // No explicit spawn: the first scoped command ensures the cwd's
@@ -2251,7 +2300,7 @@ async function boot(_respawn = false): Promise<void> {
       if (gen !== bootGen) return;
       bootError = String(e); booting = false; renderSettled();
       showConnError("Couldn't connect to pi.", () => boot(true));
-    } finally { navigating = false; updateSendState(); if (!bootError && !dialogs.size) inputEl.focus(); }
+    } finally { navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
   })();
   try { await bootPromise; } finally { bootPromise = null; }
 }

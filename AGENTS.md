@@ -20,7 +20,7 @@
   - CSS animations: `transform` + `opacity` only. No `backdrop-filter` over scrolling lists. No blur over large areas.
   - Cap DOM nodes: virtualize or window chat lists >200 items, truncate tool output at 200 lines with "show full" on demand, collapse thinking by default.
   - Debounce search inputs (150ms), throttle autoscroll with `requestAnimationFrame`, use `IntersectionObserver` for code-block highlighting (lazy).
-  - Rust backend: a small pool of `pi --mode rpc` processes, one per live chat (cap 6, 15-min idle reap, streaming runs are immortal). Reaping is lazy on pool access — no timers, idle = 0% CPU. Line-buffered JSONL split on `\n` only (never Node `readline` semantics). Reuse buffers, avoid cloning large payloads. Emit Tauri events, don't log hot paths.
+  - Rust backend: a small pool of `pi --mode rpc` processes, one per live chat (cap 6, 15-min idle reap; streaming runs and the visible chat's process are immortal). Reaping is lazy on pool access — no timers, idle = 0% CPU. Stdin writes are 30s-bounded with stale-process retirement (an unwritable child can never wedge a send forever). Line-buffered JSONL split on `\n` only (never Node `readline` semantics). Reuse buffers, avoid cloning large payloads. Emit Tauri events, don't log hot paths.
   - No telemetry, no auto-updater polling, no background timers. Idle = 0% CPU.
   - Bundle: no images, no fonts, inline SVG icons only. Target <300KB frontend JS.
 - Measure before adding: if a dependency adds >10KB or a timer, justify it in the PR/commit message.

@@ -55,6 +55,9 @@ struct Pool {
     default_model: Mutex<Option<(String, String)>>,
     default_thinking: Mutex<Option<String>>,
     pi_bin: Mutex<Option<PathBuf>>,
+    /// Scope of the visible chat. Its process is exempt from reaping — the
+    /// tab you are looking at stays connected (CodeG's active-tab rule).
+    visible: Mutex<(String, Option<String>)>,
 }
 
 impl Pool {
@@ -66,7 +69,16 @@ impl Pool {
             default_model: Mutex::new(None),
             default_thinking: Mutex::new(None),
             pi_bin: Mutex::new(None),
+            visible: Mutex::new((String::new(), None)),
         }
+    }
+}
+
+/// Does this instance hold the visible chat? Pure (unit-tested).
+fn matches_scope(file: Option<&str>, cwd: &str, vis_cwd: &str, vis_sess: Option<&str>) -> bool {
+    match vis_sess {
+        Some(p) => file == Some(p),
+        None => file.is_none() && cwd == vis_cwd,
     }
 }
 
@@ -156,23 +168,34 @@ async fn touch(inst: &Instance) {
 }
 
 /// Send a command to one instance and wait for its correlated `response`.
-async fn inst_request(inst: &Instance, mut cmd: Value) -> Result<Value, String> {
+/// The write itself is bounded: a child that stops draining stdin must never
+/// wedge a send forever. On write stall the instance is retired so the next
+/// command respawns fresh instead of queueing behind a dead pipe.
+async fn inst_request(pool: &Arc<Pool>, inst: &Instance, mut cmd: Value) -> Result<Value, String> {
     let id = uuid::Uuid::new_v4().to_string();
     cmd["id"] = Value::String(id.clone());
     let (tx, rx) = oneshot::channel();
     inst.pending.lock().await.insert(id.clone(), tx);
     let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
-    let write_ok = async {
+    let write_ok = tokio::time::timeout(Duration::from_secs(30), async {
         let mut stdin = inst.stdin.lock().await;
         stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write failed: {}", e))?;
         stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
         stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
         Ok::<(), String>(())
-    }
+    })
     .await;
-    if let Err(e) = write_ok {
-        inst.pending.lock().await.remove(&id);
-        return Err(e);
+    match write_ok {
+        Err(_) => {
+            inst.pending.lock().await.remove(&id);
+            retire(pool, inst).await;
+            return Err("pi stopped responding (stale process retired) — retry the send".to_string());
+        }
+        Ok(Err(e)) => {
+            inst.pending.lock().await.remove(&id);
+            return Err(e);
+        }
+        Ok(Ok(())) => {}
     }
     touch(inst).await;
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
@@ -185,12 +208,24 @@ async fn inst_request(inst: &Instance, mut cmd: Value) -> Result<Value, String> 
     }
 }
 
-async fn fire_inst(inst: &Instance, cmd: Value) -> Result<(), String> {
+async fn fire_inst(pool: &Arc<Pool>, inst: &Instance, cmd: Value) -> Result<(), String> {
     let line = serde_json::to_string(&cmd).map_err(|e| format!("encode failed: {}", e))?;
-    let mut stdin = inst.stdin.lock().await;
-    stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write failed: {}", e))?;
-    stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
-    stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
+    let write_ok = tokio::time::timeout(Duration::from_secs(30), async {
+        let mut stdin = inst.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write failed: {}", e))?;
+        stdin.write_all(b"\n").await.map_err(|e| format!("stdin write failed: {}", e))?;
+        stdin.flush().await.map_err(|e| format!("stdin flush failed: {}", e))?;
+        Ok::<(), String>(())
+    })
+    .await;
+    match write_ok {
+        Err(_) => {
+            retire(pool, inst).await;
+            return Err("pi stopped responding (stale process retired)".to_string());
+        }
+        Ok(Err(e)) => return Err(e),
+        Ok(Ok(())) => {}
+    }
     touch(inst).await;
     Ok(())
 }
@@ -325,10 +360,10 @@ async fn spawn_instance(app: &AppHandle, pool: &Arc<Pool>, cwd: &str) -> Result<
     spawn_reader(app.clone(), pool.clone(), inst.clone(), stdout);
     // New processes inherit the UI's chosen model/thinking so chats never diverge.
     if let Some((p, m)) = pool.default_model.lock().await.clone() {
-        let _ = inst_request(&inst, serde_json::json!({"type": "set_model", "provider": p, "modelId": m})).await;
+        let _ = inst_request(&pool, &inst, serde_json::json!({"type": "set_model", "provider": p, "modelId": m})).await;
     }
     if let Some(l) = pool.default_thinking.lock().await.clone() {
-        let _ = inst_request(&inst, serde_json::json!({"type": "set_thinking_level", "level": l})).await;
+        let _ = inst_request(&pool, &inst, serde_json::json!({"type": "set_thinking_level", "level": l})).await;
     }
     pool.instances.lock().await.insert(id, inst.clone());
     Ok(inst)
@@ -337,7 +372,7 @@ async fn spawn_instance(app: &AppHandle, pool: &Arc<Pool>, cwd: &str) -> Result<
 /// Re-read which session file an instance holds (created on first prompt,
 /// changed by switch/new_session). Keeps scope→instance routing exact.
 async fn learn_file(pool: &Arc<Pool>, inst: &Instance) {
-    if let Ok(r) = inst_request(inst, serde_json::json!({"type": "get_state"})).await {
+    if let Ok(r) = inst_request(&pool, inst, serde_json::json!({"type": "get_state"})).await {
         if let Some(f) = r.pointer("/data/sessionFile").and_then(Value::as_str) {
             *inst.session_file.lock().await = Some(f.to_string());
             pool.recent.lock().await.insert(inst.cwd.clone(), f.to_string());
@@ -345,7 +380,9 @@ async fn learn_file(pool: &Arc<Pool>, inst: &Instance) {
     }
 }
 
-async fn kill_instance(pool: &Arc<Pool>, inst: &Arc<Instance>) {
+/// Retire one instance: mark silent (no disconnect event), kill, drop.
+/// Used by the reaper and by the write-stall path in inst_request/fire_inst.
+async fn retire(pool: &Arc<Pool>, inst: &Instance) {
     inst.retired.store(true, Ordering::SeqCst);
     {
         let mut child = inst.child.lock().await;
@@ -356,7 +393,13 @@ async fn kill_instance(pool: &Arc<Pool>, inst: &Arc<Instance>) {
     inst.pending.lock().await.clear();
 }
 
+async fn kill_instance(pool: &Arc<Pool>, inst: &Arc<Instance>) {
+    retire(pool, inst).await;
+}
+
 /// Lazy reaper: runs on pool access, never on a timer (idle = 0% CPU).
+/// The visible chat's process is exempt — the tab you are looking at stays
+/// connected no matter how long it idles.
 async fn sweep(pool: &Arc<Pool>) {
     let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
     let mut states = Vec::with_capacity(insts.len());
@@ -364,11 +407,21 @@ async fn sweep(pool: &Arc<Pool>) {
         states.push((i.id, i.streaming.load(Ordering::SeqCst), *i.last_active.lock().await));
     }
     let victims = sweep_plan(&states, Instant::now(), MAX_LIVE, Duration::from_secs(IDLE_SECS));
+    if victims.is_empty() {
+        return;
+    }
+    let (vis_cwd, vis_sess) = pool.visible.lock().await.clone();
     for id in victims {
-        if let Some(inst) = pool.instances.lock().await.get(&id).cloned() {
-            if !inst.streaming.load(Ordering::SeqCst) {
-                kill_instance(pool, &inst).await;
-            }
+        let Some(inst) = insts.iter().find(|i| i.id == id).cloned() else { continue };
+        if inst.streaming.load(Ordering::SeqCst) {
+            continue;
+        }
+        let file = inst.session_file.lock().await.clone();
+        if matches_scope(file.as_deref(), &inst.cwd, &vis_cwd, vis_sess.as_deref()) {
+            continue;
+        }
+        if pool.instances.lock().await.contains_key(&id) {
+            kill_instance(pool, &inst).await;
         }
     }
 }
@@ -416,6 +469,7 @@ async fn match_instance(pool: &Arc<Pool>, cwd: &str, session: Option<&str>) -> O
 /// Lookup only: runs that must address a live process (abort, dialog
 /// responses, queue clears) fail instead of spawning a stranger.
 async fn find(pool: &Arc<Pool>, cwd: &str, session: Option<&str>) -> Option<Arc<Instance>> {
+    *pool.visible.lock().await = (cwd.to_string(), session.map(String::from));
     sweep(pool).await;
     match_instance(pool, cwd, session).await
 }
@@ -426,6 +480,7 @@ async fn find(pool: &Arc<Pool>, cwd: &str, session: Option<&str>) -> Option<Arc<
 /// reuse only ever touches never-run idle instances — live sessions are
 /// never disturbed.
 async fn ensure(app: &AppHandle, pool: &Arc<Pool>, cwd: &str, session: Option<String>, pristine: bool) -> Result<Arc<Instance>, String> {
+    *pool.visible.lock().await = (cwd.to_string(), session.clone());
     sweep(pool).await;
     if pristine && session.is_none() {
         let cand = {
@@ -444,7 +499,7 @@ async fn ensure(app: &AppHandle, pool: &Arc<Pool>, cwd: &str, session: Option<St
         };
         if let Some(inst) = cand {
             touch(&inst).await;
-            inst_request(&inst, serde_json::json!({"type": "new_session"})).await?;
+            inst_request(&pool, &inst, serde_json::json!({"type": "new_session"})).await?;
             learn_file(pool, &inst).await;
             return Ok(inst);
         }
@@ -468,10 +523,10 @@ async fn ensure(app: &AppHandle, pool: &Arc<Pool>, cwd: &str, session: Option<St
     }
     let inst = spawn_instance(app, pool, cwd).await?;
     if let Some(p) = session {
-        inst_request(&inst, serde_json::json!({"type": "switch_session", "sessionPath": p})).await?;
+        inst_request(&pool, &inst, serde_json::json!({"type": "switch_session", "sessionPath": p})).await?;
         learn_file(pool, &inst).await;
     } else if pristine {
-        inst_request(&inst, serde_json::json!({"type": "new_session"})).await?;
+        inst_request(&pool, &inst, serde_json::json!({"type": "new_session"})).await?;
         learn_file(pool, &inst).await;
     } else {
         learn_file(pool, &inst).await;
@@ -493,7 +548,7 @@ async fn pi_prompt(cwd: String, session: Option<String>, message: String, images
     let inst = ensure(&app, &pool, &cwd, session, true).await?;
     let mut cmd = serde_json::json!({ "type": "prompt", "message": message });
     attach_images(&mut cmd, images);
-    inst_request(&inst, cmd).await?;
+    inst_request(&pool, &inst, cmd).await?;
     learn_file(&pool, &inst).await;
     Ok(serde_json::json!({ "accepted": true }))
 }
@@ -503,7 +558,7 @@ async fn pi_steer(cwd: String, session: Option<String>, message: String, images:
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
     let mut cmd = serde_json::json!({ "type": "steer", "message": message });
     attach_images(&mut cmd, images);
-    let r = inst_request(&inst, cmd).await?;
+    let r = inst_request(&pool, &inst, cmd).await?;
     Ok(r)
 }
 
@@ -513,7 +568,7 @@ async fn pi_follow_up(cwd: String, session: Option<String>, message: String, ima
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
     let mut cmd = serde_json::json!({ "type": "follow_up", "message": message });
     attach_images(&mut cmd, images);
-    let r = inst_request(&inst, cmd).await?;
+    let r = inst_request(&pool, &inst, cmd).await?;
     Ok(r)
 }
 
@@ -522,7 +577,7 @@ async fn pi_clear_queue(cwd: String, session: Option<String>, pool: State<'_, Ar
     // explicit user action only — Esc/Stop must not silently clear queued items.
     // Lookup only: never spawn a stranger just to clear its (empty) queue.
     let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "clear_queue" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "clear_queue" })).await?;
     Ok(r)
 }
 
@@ -532,7 +587,7 @@ async fn pi_abort(cwd: String, session: Option<String>, pool: State<'_, Arc<Pool
     // continues them when they remain); the UI offers an explicit Clear.
     // Lookup only: a missing process means nothing is running.
     let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "abort" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "abort" })).await?;
     Ok(r)
 }
 
@@ -550,7 +605,7 @@ async fn pi_new_chat(cwd: String, app: AppHandle, pool: State<'_, Arc<Pool>>) ->
 #[tauri::command]
 async fn pi_get_messages(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "get_messages" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_messages" })).await?;
     let msgs = r.pointer("/data/messages").cloned().unwrap_or(Value::Null);
     Ok(serde_json::json!({ "messages": msgs }))
 }
@@ -558,7 +613,7 @@ async fn pi_get_messages(cwd: String, session: Option<String>, app: AppHandle, p
 #[tauri::command]
 async fn pi_get_state(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_state" })).await?;
     let mut data = r.pointer("/data").cloned().unwrap_or(serde_json::json!({}));
     data["cwd"] = Value::String(inst.cwd.clone());
     // Free affirmation: every state read keeps scope routing exact.
@@ -572,7 +627,7 @@ async fn pi_get_state(cwd: String, session: Option<String>, app: AppHandle, pool
 #[tauri::command]
 async fn pi_get_stats(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "get_session_stats" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_session_stats" })).await?;
     Ok(r.pointer("/data").cloned().unwrap_or(Value::Null))
 }
 
@@ -581,15 +636,15 @@ async fn pi_get_commands(cwd: String, session: Option<String>, app: AppHandle, p
     // Skills (+ prompt templates / extension commands) differ per project,
     // so this is scoped like everything else; the UI caches per cwd.
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "get_commands" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_commands" })).await?;
     Ok(serde_json::json!({ "commands": r.pointer("/data/commands").cloned().unwrap_or(Value::Null) }))
 }
 
 #[tauri::command]
 async fn pi_get_models(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let models_r = inst_request(&inst, serde_json::json!({ "type": "get_available_models" })).await?;
-    let state_r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
+    let models_r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_available_models" })).await?;
+    let state_r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_state" })).await?;
     let models = models_r.pointer("/data/models").cloned().unwrap_or(Value::Null);
     let cur = state_r
         .pointer("/data/model")
@@ -608,7 +663,7 @@ async fn pi_set_model(provider: String, model_id: String, pool: State<'_, Arc<Po
     *pool.default_model.lock().await = Some((provider.clone(), model_id.clone()));
     let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
     for inst in &insts {
-        let _ = inst_request(inst, serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id })).await;
+        let _ = inst_request(&pool, inst, serde_json::json!({ "type": "set_model", "provider": provider, "modelId": model_id })).await;
     }
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -618,7 +673,7 @@ async fn pi_set_thinking(level: String, pool: State<'_, Arc<Pool>>) -> Result<Va
     *pool.default_thinking.lock().await = Some(level.clone());
     let insts: Vec<Arc<Instance>> = pool.instances.lock().await.values().cloned().collect();
     for inst in &insts {
-        let _ = inst_request(inst, serde_json::json!({ "type": "set_thinking_level", "level": level })).await;
+        let _ = inst_request(&pool, inst, serde_json::json!({ "type": "set_thinking_level", "level": level })).await;
     }
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -626,21 +681,21 @@ async fn pi_set_thinking(level: String, pool: State<'_, Arc<Pool>>) -> Result<Va
 #[tauri::command]
 async fn pi_compact(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "compact" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "compact" })).await?;
     Ok(r)
 }
 
 #[tauri::command]
 async fn pi_export(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "export_html" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "export_html" })).await?;
     Ok(r.pointer("/data").cloned().unwrap_or(Value::Null))
 }
 
 #[tauri::command]
 async fn pi_set_name(cwd: String, session: Option<String>, name: String, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "set_session_name", "name": name })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "set_session_name", "name": name })).await?;
     Ok(r)
 }
 
@@ -655,14 +710,14 @@ async fn pi_ui_response(cwd: String, session: Option<String>, id: String, payloa
         }
     }
     let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
-    fire_inst(&inst, cmd).await?;
+    fire_inst(&pool, &inst, cmd).await?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
 async fn pi_list_sessions(cwd: String, session: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let inst = ensure(&app, &pool, &cwd, session, false).await?;
-    let r = inst_request(&inst, serde_json::json!({ "type": "get_state" })).await?;
+    let r = inst_request(&pool, &inst, serde_json::json!({ "type": "get_state" })).await?;
     let active = r.pointer("/data/sessionFile").and_then(Value::as_str).map(String::from);
     // Respect the harness' actual session directory, including custom settings.
     let dir = active.as_ref().and_then(|p| PathBuf::from(p).parent().map(|p| p.to_path_buf()));
@@ -807,6 +862,14 @@ mod tests {
         // streaming alone past the cap still overflows rather than killing work
         let states = vec![(1, true, ago(1)), (2, true, ago(1))];
         assert!(sweep_plan(&states, now, 1, Duration::from_secs(900)).is_empty());
+    }
+    #[test]
+    fn visible_chat_matches_for_reaper_exemption() {
+        assert!(matches_scope(Some("/a/b.jsonl"), "/a", "/a", Some("/a/b.jsonl")));
+        assert!(!matches_scope(Some("/a/c.jsonl"), "/a", "/a", Some("/a/b.jsonl")));
+        assert!(matches_scope(None, "/a", "/a", None));
+        assert!(!matches_scope(Some("/a/b.jsonl"), "/a", "/a", None));
+        assert!(!matches_scope(None, "/b", "/a", None));
     }
     #[test]
     fn rejection_is_an_error() {
