@@ -130,8 +130,11 @@ h1 { margin: 0; }
 .p-row { display: flex; align-items: center; gap: 2px; }
 .p-row .project-head { flex: 1; min-width: 0; }
 .p-x { display: none; border: none; background: none; color: var(--quiet); cursor: pointer; font-size: 12px; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; }
-.p-row:hover .p-x { display: block; }
+.p-row:hover .p-x, .p-x:focus-visible { display: block; }
 .p-x:hover { color: var(--ink); background: var(--surface-deep); }
+.p-add { display: none; border: none; background: none; color: var(--quiet); cursor: pointer; font-size: 14px; line-height: 1; padding: 4px 6px; border-radius: 6px; flex-shrink: 0; }
+.p-row:hover .p-add, .p-add:focus-visible { display: block; }
+.p-add:hover { color: var(--ink); background: var(--surface-deep); }
 .project-chats { padding-left: 12px; }
 .project-chats .chat-item { width: 100%; }
 .project-empty { font-size: 11.5px; color: var(--quiet); padding: 4px 8px 8px 20px; }

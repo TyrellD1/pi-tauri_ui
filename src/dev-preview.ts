@@ -182,6 +182,9 @@ export function installPreview() {
       input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(30);
       check('skill inserts canonical name',input.value.includes('/skill:image-gen'));
       check('skill popup closes on accept',$('skill-pop').classList.contains('hidden'));
+      const chatsBefore=calls.filter(c=>c.cmd==='pi_new_chat').length;
+      $('chat-list').querySelector<HTMLButtonElement>('.p-add')!.click();await sleep(100);
+      check('project plus starts new chat',input.value==='' && calls.filter(c=>c.cmd==='pi_new_chat').length===chatsBefore+1);
       type('saved with first chat');const firstPath=path;$('btn-new').click();await sleep(80);
       check('new chat has its own draft',input.value==='');
       // Navigation through real Settings needs no respawn: one scoped state

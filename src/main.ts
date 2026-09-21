@@ -786,6 +786,14 @@ function renderProjects() {
       renderProjects();
     };
     row.appendChild(head);
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "p-add";
+    add.textContent = "+";
+    add.title = `New chat in ${baseName(p)}`;
+    add.setAttribute("aria-label", `New chat in ${baseName(p)}`);
+    add.onclick = () => newChatInProject(p);
+    row.appendChild(add);
     if (p !== cwd) {
       const x = document.createElement("button");
       x.type = "button";
@@ -1584,18 +1592,19 @@ async function openSession(project: string, path: string | null) {
     notify({ text: `Couldn't open chat: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openSession(project, path) });
   } finally { targetScope = null; navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
 }
-async function newChat() {
+async function newChat() { await newChatInProject(cwd); }
+async function newChatInProject(project: string) {
   if (navigating || booting || sendInFlight) return;
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
   let path: string;
   try {
-    const r = await invokeChecked<{ path: string }>("pi_new_chat", { cwd });
+    const r = await invokeChecked<{ path: string }>("pi_new_chat", { cwd: project });
     path = r.path;
   } catch (e) {
     notify({ text: `Couldn't start a new chat: ${String(e)}`, kind: "error", sticky: true });
     return;
   }
-  await openSession(cwd, path);
+  await openSession(project, path);
 }
 async function setCwd(ncwd: string) { await openSession(ncwd, null); }
 
