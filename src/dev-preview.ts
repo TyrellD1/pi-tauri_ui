@@ -185,6 +185,13 @@ export function installPreview() {
       const chatsBefore=calls.filter(c=>c.cmd==='pi_new_chat').length;
       $('chat-list').querySelector<HTMLButtonElement>('.p-add')!.click();await sleep(100);
       check('project plus starts new chat',input.value==='' && calls.filter(c=>c.cmd==='pi_new_chat').length===chatsBefore+1);
+      $('chat-list').querySelector<HTMLButtonElement>('.chat-item')!.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:60,clientY:60}));await sleep(60);
+      check('chat context menu opens',!!$('menu-root').querySelector('.menu-item'));
+      Array.from($('menu-root').querySelectorAll('button')).find(b=>b.textContent?.includes('Add to group'))!.click();await sleep(30);
+      Array.from($('menu-root').querySelectorAll('button')).find(b=>b.textContent?.includes('New group'))!.click();await sleep(30);
+      ($('modal-root').querySelector('#m-group') as HTMLInputElement).value='Testers';
+      Array.from($('modal-root').querySelectorAll('button')).find(b=>b.textContent==='Create')!.click();await sleep(60);
+      check('new group holds the chat',$('chat-list').textContent!.includes('Testers'));
       type('saved with first chat');const firstPath=path;$('btn-new').click();await sleep(80);
       check('new chat has its own draft',input.value==='');
       // Navigation through real Settings needs no respawn: one scoped state

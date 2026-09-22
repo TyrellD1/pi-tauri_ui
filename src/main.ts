@@ -558,6 +558,60 @@ function hiddenProjects(): Set<string> {
     return new Set();
   }
 }
+type ChatGroups = Record<string, string[]>;
+function loadGroups(): ChatGroups {
+  try {
+    const raw = prefGet("pi-chat-groups");
+    const o = raw ? (JSON.parse(raw) as unknown) : {};
+    if (o && typeof o === "object" && !Array.isArray(o)) {
+      const out: ChatGroups = {};
+      for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
+        if (k && Array.isArray(v)) out[k] = v.filter((p): p is string => typeof p === "string" && !!p);
+      }
+      return out;
+    }
+  } catch { /* ignore */ }
+  return {};
+}
+function saveGroups(g: ChatGroups) { prefSet("pi-chat-groups", JSON.stringify(g)); }
+function groupClosed(): Set<string> {
+  try {
+    const a = JSON.parse(prefGet("pi-groups-closed") ?? "[]") as unknown;
+    return new Set(Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : []);
+  } catch { return new Set(); }
+}
+function saveGroupClosed(s: Set<string>) { prefSet("pi-groups-closed", JSON.stringify([...s])); }
+function parentsOpen(): { groups: boolean; projects: boolean } {
+  try {
+    const o = JSON.parse(prefGet("pi-parents") ?? "{}") as { groups?: boolean; projects?: boolean };
+    return { groups: o.groups !== false, projects: o.projects !== false };
+  } catch { return { groups: true, projects: true }; }
+}
+function saveParents(p: { groups: boolean; projects: boolean }) { prefSet("pi-parents", JSON.stringify(p)); }
+function findProjectForPath(path: string): string | null {
+  for (const [c, list] of projectChats) if (list.some((s) => s.path === path)) return c;
+  if (sessions.some((s) => s.path === path)) return cwd;
+  return null;
+}
+function groupHomeProject(name: string, groups: ChatGroups): string {
+  const paths = groups[name] ?? [];
+  for (let i = paths.length - 1; i >= 0; i--) {
+    const c = findProjectForPath(paths[i]);
+    if (c) return c;
+  }
+  return cwd;
+}
+function groupChats(name: string, groups: ChatGroups, q: string): { info: SessionInfo; project: string }[] {
+  const out: { info: SessionInfo; project: string }[] = [];
+  for (const path of groups[name] ?? []) {
+    const c = findProjectForPath(path);
+    if (!c) continue;
+    const info = (projectChats.get(c) ?? []).find((s) => s.path === path);
+    if (!info || !chatMatches(info, q)) continue;
+    out.push({ info, project: c });
+  }
+  return out;
+}
 let projectOrder: string[] = [];
 function getProjects(): string[] {
   const hidden = hiddenProjects();
@@ -612,6 +666,22 @@ async function refreshAllProjects() {
   if (cwd && !expandedProjects.has(cwd)) {
     expandedProjects.add(cwd);
     saveExpanded();
+  }
+  if (unseenFinished.size) {
+    const known = new Set<string>();
+    for (const [c, list] of projectChats) for (const s of list) known.add(`${c}:${s.path}`);
+    let pruned = false;
+    for (const k of unseenFinished) if (!known.has(k)) { unseenFinished.delete(k); pruned = true; }
+    const g = loadGroups();
+    let gdirty = false;
+    const paths = new Set<string>();
+    for (const list of projectChats.values()) for (const s of list) paths.add(s.path);
+    for (const [n, arr] of Object.entries(g)) {
+      const kept = arr.filter((p) => paths.has(p));
+      if (kept.length !== arr.length) { g[n] = kept; gdirty = true; }
+    }
+    if (gdirty) saveGroups(g);
+    if (pruned) saveUnseen();
   }
   renderProjects();
 }
@@ -720,12 +790,23 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   time.className = "ci-time";
   time.textContent = fmtRelative(s.mtime);
   row.appendChild(t);
-  if (runningSet.has(`${project}:${s.path}`)) {
+  el.dataset.path = s.path;
+  el.dataset.project = project;
+  const rkey = `${project}:${s.path}`;
+  const rlabel = s.name || s.preview.slice(0, 60) || "Untitled";
+  if (runningSet.has(rkey)) {
+    const spin = document.createElement("span");
+    spin.className = "run-spin";
+    spin.title = "Running";
+    spin.setAttribute("role", "img");
+    spin.setAttribute("aria-label", `${rlabel} is running`);
+    row.appendChild(spin);
+  } else if (unseenFinished.has(rkey)) {
     const dot = document.createElement("span");
     dot.className = "run-dot";
-    dot.title = "Running";
+    dot.title = "Finished — not yet viewed";
     dot.setAttribute("role", "img");
-    dot.setAttribute("aria-label", `${s.name || s.preview.slice(0, 60) || "Untitled"} is running`);
+    dot.setAttribute("aria-label", `${rlabel} finished`);
     row.appendChild(dot);
   }
   row.appendChild(time);
@@ -741,15 +822,208 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
 
 function renderProjects() {
   const q = filter.trim().toLowerCase();
-  const projects = getProjects();
   chatListEl.innerHTML = "";
+  const parents = parentsOpen();
+  renderGroupsParent(q, parents.groups);
+  renderProjectsParent(q, parents.projects);
+}
+function parentHead(title: string, key: "groups" | "projects", isOpen: boolean, extra: HTMLElement | null): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "p-row parent-row";
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "project-head parent-head" + (isOpen ? " open" : "");
+  head.setAttribute("aria-expanded", String(isOpen));
+  head.title = title;
+  const chev = document.createElement("span");
+  chev.innerHTML = chevSvg();
+  const name = document.createElement("span");
+  name.className = "p-name";
+  name.textContent = title;
+  head.appendChild(chev);
+  head.appendChild(name);
+  head.onclick = () => {
+    const p = parentsOpen();
+    p[key] = !p[key];
+    saveParents(p);
+    renderProjects();
+  };
+  row.appendChild(head);
+  if (extra) row.appendChild(extra);
+  return row;
+}
+function miniButton(label: string, title: string, onClick: () => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "mini-add";
+  b.textContent = label;
+  b.title = title;
+  b.setAttribute("aria-label", title);
+  b.onclick = onClick;
+  return b;
+}
+function renderGroupsParent(q: string, isOpen: boolean) {
+  const groups = loadGroups();
+  const names = Object.keys(groups);
+  const rows = names.map((n) => ({ name: n, list: groupChats(n, groups, q) }));
+  const visible = q ? rows.filter((r) => r.list.length > 0) : rows;
+  if (q && visible.length === 0) return;
+  const section = document.createElement("div");
+  section.className = "parent-section";
+  section.setAttribute("role", "group");
+  section.setAttribute("aria-label", "Groups");
+  section.appendChild(parentHead("Groups", "groups", isOpen, miniButton("+", "New group", () => openNewGroup(null))));
+  if (!isOpen) { chatListEl.appendChild(section); return; }
+  for (const { name, list } of visible) section.appendChild(groupSection(name, list, q));
+  if (!q && names.length === 0) {
+    const e = document.createElement("div");
+    e.className = "project-empty";
+    e.textContent = "No groups yet. Right-click any chat to group it.";
+    section.appendChild(e);
+  }
+  chatListEl.appendChild(section);
+}
+function groupSection(name: string, list: { info: SessionInfo; project: string }[], q: string): HTMLElement {
+  const section = document.createElement("div");
+  section.className = "project-section group-section";
+  section.dataset.group = name;
+  section.setAttribute("role", "group");
+  section.setAttribute("aria-label", `Group ${name}`);
+  const row = document.createElement("div");
+  row.className = "p-row";
+  const head = document.createElement("button");
+  head.type = "button";
+  const closed = groupClosed();
+  const open = !!q || !closed.has(name);
+  head.className = "project-head" + (open ? " open" : "");
+  head.setAttribute("aria-expanded", String(open));
+  head.title = name;
+  const chev = document.createElement("span");
+  chev.innerHTML = chevSvg();
+  const label = document.createElement("span");
+  label.className = "p-name";
+  label.textContent = name;
+  const count = document.createElement("span");
+  count.className = "p-count";
+  count.textContent = String(list.length);
+  head.appendChild(chev);
+  head.appendChild(label);
+  head.appendChild(count);
+  head.onclick = () => {
+    const c = groupClosed();
+    if (c.has(name)) c.delete(name); else c.add(name);
+    saveGroupClosed(c);
+    renderProjects();
+  };
+  row.appendChild(head);
+  const add = document.createElement("button");
+  add.type = "button";
+  add.className = "p-add";
+  add.textContent = "+";
+  add.title = `New chat in this group (${name})`;
+  add.setAttribute("aria-label", `New chat in group ${name}`);
+  add.onclick = () => newChatInGroup(name);
+  row.appendChild(add);
+  const x = document.createElement("button");
+  x.type = "button";
+  x.className = "p-x";
+  x.textContent = "✕";
+  x.title = `Delete group ${name} (chats stay in their projects)`;
+  x.setAttribute("aria-label", `Delete group ${name}`);
+  x.onclick = () => {
+    const g = loadGroups();
+    delete g[name];
+    saveGroups(g);
+    renderProjects();
+  };
+  row.appendChild(x);
+  section.appendChild(row);
+  if (!open) return section;
+  const box = document.createElement("div");
+  box.className = "project-chats";
+  if (list.length === 0) {
+    const e = document.createElement("div");
+    e.className = "project-empty";
+    e.textContent = q ? "No matches in this group." : "No chats yet. Right-click a chat to add it here.";
+    box.appendChild(e);
+  } else {
+    for (const { info, project } of list) box.appendChild(chatButton(info, project));
+  }
+  section.appendChild(box);
+  return section;
+}
+function openNewGroup(firstPath: string | null) {
+  openModal("New group", (box, close) => {
+    const lab = document.createElement("label");
+    lab.textContent = "Group name";
+    lab.setAttribute("for", "m-group");
+    const inp = document.createElement("input");
+    inp.id = "m-group";
+    inp.placeholder = "e.g. launch-blockers";
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const c = document.createElement("button");
+    c.type = "button";
+    c.textContent = "Cancel";
+    c.onclick = close;
+    const s = document.createElement("button");
+    s.type = "button";
+    s.textContent = "Create";
+    s.className = "primary";
+    s.onclick = () => {
+      const name = inp.value.trim();
+      close();
+      if (!name) return;
+      const g = loadGroups();
+      if (!g[name]) g[name] = [];
+      if (firstPath && !g[name].includes(firstPath)) g[name].push(firstPath);
+      saveGroups(g);
+      const closed = groupClosed();
+      if (closed.delete(name)) saveGroupClosed(closed);
+      renderProjects();
+      notify({ text: firstPath ? `Created ${name} and added this chat.` : `Created group ${name}.` });
+    };
+    row.appendChild(c);
+    row.appendChild(s);
+    box.appendChild(lab);
+    box.appendChild(inp);
+    box.appendChild(row);
+    inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.isComposing) s.click();
+    });
+  });
+}
+async function newChatInGroup(group: string) {
+  const groups = loadGroups();
+  if (!groups[group]) return;
+  const project = groupHomeProject(group, groups);
+  const path = await newChatInProject(project);
+  if (!path) return;
+  const g = loadGroups();
+  if (!g[group]) return;
+  if (!g[group].includes(path)) { g[group].push(path); saveGroups(g); }
+  notify({ text: `New chat in ${baseName(project)} · added to ${group}.` });
+  renderProjects();
+}
+function renderProjectsParent(q: string, isOpen: boolean) {
+  const projects = getProjects();
+  const section = document.createElement("div");
+  section.className = "parent-section";
+  section.setAttribute("role", "group");
+  section.setAttribute("aria-label", "Projects");
+  section.appendChild(parentHead("Projects", "projects", isOpen, miniButton("+", "Add project folder", openAddProject)));
+  chatListEl.appendChild(section);
+  if (!isOpen) return;
+  const projSection = document.createElement("div");
+  projSection.className = "parent-body";
+  section.appendChild(projSection);
   if (projects.length === 0) {
     const d = document.createElement("div");
     d.className = "list-empty";
     const p = document.createElement("p");
     p.textContent = "No projects yet. Add one to see its chats.";
     d.appendChild(p);
-    chatListEl.appendChild(d);
+    projSection.appendChild(d);
     return;
   }
   for (const p of projects) {
@@ -843,7 +1117,7 @@ function renderProjects() {
       }
       section.appendChild(box);
     }
-    chatListEl.appendChild(section);
+    projSection.appendChild(section);
   }
   const hidden = hiddenProjects();
   for (const u of unlinked) {
@@ -906,7 +1180,7 @@ function renderProjects() {
       }
     }
     section.appendChild(box);
-    chatListEl.appendChild(section);
+    projSection.appendChild(section);
   }
 }
 
@@ -918,6 +1192,108 @@ chatListEl.addEventListener("keydown", (e) => {
   const i = items.indexOf(document.activeElement as HTMLButtonElement);
   const next = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
   items[next].focus();
+});
+
+// ---------- chat context menu (right-click): groups ----------
+interface CtxTarget { path: string; project: string | null; inGroup: string | null }
+function openChatMenu(x: number, y: number, target: CtxTarget) {
+  closeMenu();
+  lastFocus = document.activeElement as HTMLElement;
+  const menu = document.createElement("div");
+  menu.className = "menu ctx-menu";
+  menu.setAttribute("role", "menu");
+  menu.setAttribute("aria-label", "Chat actions");
+  const buttons: HTMLButtonElement[] = [];
+  const addItem = (label: string, onPick: () => void, checked?: boolean) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "menu-item";
+    b.setAttribute("role", "menuitem");
+    const check = document.createElement("span");
+    check.className = "check";
+    check.textContent = checked ? "✓" : "";
+    const lab = document.createElement("span");
+    lab.textContent = label;
+    b.appendChild(check);
+    b.appendChild(lab);
+    b.onclick = () => { closeMenu(); onPick(); };
+    menu.appendChild(b);
+    buttons.push(b);
+    return b;
+  };
+  const renderMain = () => {
+    menu.replaceChildren(); buttons.length = 0;
+    if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
+    if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
+    addItem("Add to group ›", renderGroups);
+  };
+  const renderGroups = () => {
+    menu.replaceChildren(); buttons.length = 0;
+    const groups = loadGroups();
+    const names = Object.keys(groups);
+    addItem("‹ Back", renderMain);
+    if (names.length === 0) {
+      const e = document.createElement("div");
+      e.className = "menu-note";
+      e.textContent = "No groups yet.";
+      menu.appendChild(e);
+    }
+    for (const n of names) {
+      const member = groups[n].includes(target.path);
+      addItem(n, () => toggleGroupMember(n, target.path), member);
+    }
+    addItem("＋ New group", () => openNewGroup(target.path));
+  };
+  renderMain();
+  menuRoot.appendChild(menu);
+  const w = 240, h = Math.min(menu.offsetHeight || 200, window.innerHeight - 16);
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - h - 8))}px`;
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - w - 8))}px`;
+  menu.style.minWidth = `${w}px`;
+  let idx = 0;
+  buttons[0]?.focus();
+  menu.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); idx = (idx + 1) % buttons.length; buttons[idx].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); idx = (idx - 1 + buttons.length) % buttons.length; buttons[idx].focus(); }
+    else if (e.key === "Tab") { closeMenu(); }
+  });
+  menuOutside = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node)) closeMenu();
+  };
+  document.addEventListener("mousedown", menuOutside);
+}
+function toggleGroupMember(name: string, path: string) {
+  const g = loadGroups();
+  if (!g[name]) return;
+  if (g[name].includes(path)) {
+    g[name] = g[name].filter((p) => p !== path);
+    notify({ text: `Removed from ${name}.` });
+  } else {
+    g[name].push(path);
+    notify({ text: `Added to ${name}.` });
+  }
+  saveGroups(g);
+  renderProjects();
+}
+function removeFromGroup(name: string, path: string) {
+  const g = loadGroups();
+  if (!g[name]) return;
+  g[name] = g[name].filter((p) => p !== path);
+  saveGroups(g);
+  notify({ text: `Removed from ${name}.` });
+  renderProjects();
+}
+chatListEl.addEventListener("contextmenu", (e) => {
+  const item = (e.target as HTMLElement).closest(".chat-item") as HTMLElement | null;
+  if (!item || !item.dataset.path) return;
+  e.preventDefault();
+  const groupSection = item.closest(".group-section") as HTMLElement | null;
+  openChatMenu(e.clientX, e.clientY, {
+    path: item.dataset.path,
+    project: item.dataset.project ?? null,
+    inGroup: groupSection?.dataset.group ?? null,
+  });
 });
 
 type Block =
@@ -1283,6 +1659,23 @@ function updateSendState() {
 // events must never render into the visible chat). runningSet drives the
 // pulsing blue dots in the sidebar.
 const runningSet = new Set<string>();
+// Chats whose background run finished while you weren't looking. Blue dot
+// until opened. Persisted so it survives app restarts.
+let unseenFinished = new Set<string>();
+function loadUnseen() {
+  try {
+    const raw = localStorage.getItem("pi-unseen-finished");
+    const arr = raw ? JSON.parse(raw) : [];
+    unseenFinished = new Set(Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string") : []);
+  } catch { unseenFinished = new Set(); }
+}
+function saveUnseen() {
+  try {
+    const arr = [...unseenFinished].slice(-100);
+    unseenFinished = new Set(arr);
+    localStorage.setItem("pi-unseen-finished", JSON.stringify(arr));
+  } catch { /* ignore */ }
+}
 function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
 function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
@@ -1575,7 +1968,10 @@ async function openSession(project: string, path: string | null) {
     return;
   }
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
-  if (path !== null && project === cwd && path === activePath) return;
+  if (path !== null && project === cwd && path === activePath) {
+    if (unseenFinished.delete(`${project}:${path}`)) { saveUnseen(); renderProjects(); }
+    return;
+  }
   navigating = true; saveDraft(); ++bootGen; updateSendState();
   armWatchdog();
   if (!eventsReady) await initEvents();
@@ -1583,6 +1979,7 @@ async function openSession(project: string, path: string | null) {
   try {
     await refreshState();
     if (activePath === null) throw new Error("pi returned no session");
+    if (unseenFinished.delete(visibleKey())) saveUnseen();
     clearRunScope(true); restoreDraft(); updateSkillPop();
     await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshCommands(); await refreshStats();
     expandedProjects.add(project); saveExpanded();
@@ -1593,18 +1990,19 @@ async function openSession(project: string, path: string | null) {
   } finally { targetScope = null; navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
 }
 async function newChat() { await newChatInProject(cwd); }
-async function newChatInProject(project: string) {
-  if (navigating || booting || sendInFlight) return;
-  if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
+async function newChatInProject(project: string): Promise<string | null> {
+  if (navigating || booting || sendInFlight) return null;
+  if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return null; }
   let path: string;
   try {
     const r = await invokeChecked<{ path: string }>("pi_new_chat", { cwd: project });
     path = r.path;
   } catch (e) {
     notify({ text: `Couldn't start a new chat: ${String(e)}`, kind: "error", sticky: true });
-    return;
+    return null;
   }
   await openSession(project, path);
+  return path;
 }
 async function setCwd(ncwd: string) { await openSession(ncwd, null); }
 
@@ -1859,7 +2257,7 @@ async function handleEvent(p: PiEvent) {
     queue = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] }; renderQueue(); return;
   }
   if (t === "agent_start") {
-    if (key !== null) runningSet.add(key);
+    if (key !== null) { runningSet.add(key); unseenFinished.delete(key); saveUnseen(); }
     if (isVis) { setBusy(true); streamActivity = "thinking"; }
     else { await refreshAllProjects(); }
     renderProjects(); return;
@@ -1869,6 +2267,7 @@ async function handleEvent(p: PiEvent) {
     // handled below; everything else only keeps the sidebar dot truthful.
     if (t === "agent_settled" && key !== null) {
       runningSet.delete(key);
+      unseenFinished.add(key); saveUnseen();
       await refreshAllProjects();
       const done = sessionLabel(key);
       if (done) notify({ text: `Finished in ${done}.` });
@@ -2173,7 +2572,7 @@ applyThemeLabel();
 
 // ---------- header actions ----------
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
-($("btn-add-project") as HTMLButtonElement).onclick = openAddProject;
+
 
 // ---------- sidebar resize: drag the edge, double-click resets ----------
 const sidebarEl = $("sidebar");
@@ -2293,6 +2692,7 @@ async function boot(_respawn = false): Promise<void> {
     const gen = ++bootGen; booting = true; bootError = null; navigating = true;
     saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); visibleDialogId = null;
     updateSendState(); hideConnError(); renderSettled();
+    loadUnseen();
     armWatchdog();
     try {
       await initEvents();
