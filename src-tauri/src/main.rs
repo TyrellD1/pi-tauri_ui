@@ -780,8 +780,10 @@ fn pi_list_dirs(path: String) -> Result<Value, String> {
     }
     let entries = std::fs::read_dir(&canon).map_err(|e| format!("Cannot list {}: {}", path, e))?;
     let mut dirs: Vec<String> = Vec::new();
+    let mut truncated = false;
     for entry in entries.flatten() {
         if (dirs.len() >= 1000) {
+            truncated = true;
             break;
         }
         let name = entry.file_name();
@@ -799,6 +801,7 @@ fn pi_list_dirs(path: String) -> Result<Value, String> {
         "parent": canon.parent().map(|p| p.to_string_lossy().into_owned()),
         "home": dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string()),
         "dirs": dirs,
+        "truncated": truncated,
     }))
 }
 
@@ -957,6 +960,7 @@ mod tests {
         assert!(dirs[0].as_str().unwrap().ends_with("a-sub"));
         assert!(dirs[1].as_str().unwrap().ends_with("b-sub"));
         assert!(out.pointer("/parent").unwrap().as_str().is_some());
+        assert_eq!(out.pointer("/truncated").unwrap().as_bool(), Some(false));
         assert!(pi_list_dirs(base.join("nope").to_string_lossy().into_owned()).is_err());
         let _ = std::fs::remove_dir_all(&base);
     }

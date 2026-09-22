@@ -90,9 +90,10 @@ const queueCache = new Map<string, QueueLists>();
 const queueSeen = new Map<string, QueueLists>();
 function capQueueMap(m: Map<string, QueueLists>, keep: string) {
   while (m.size > 200) {
-    const first = m.keys().next().value as string | undefined;
-    if (first === undefined || first === keep) break;
-    m.delete(first);
+    let victim: string | undefined;
+    for (const k of m.keys()) { if (k !== keep) { victim = k; break; } }
+    if (victim === undefined) break;
+    m.delete(victim);
   }
 }
 let extStatus = "", lastFocus: HTMLElement | null = null;
@@ -220,7 +221,9 @@ interface MenuItem {
   onPick: () => void;
 }
 let menuOutside: ((e: MouseEvent) => void) | null = null;
+let ctxSubTimer: number | null = null;
 function closeMenu() {
+  if (ctxSubTimer !== null) { clearTimeout(ctxSubTimer); ctxSubTimer = null; }
   if (menuOutside) document.removeEventListener("mousedown", menuOutside);
   menuOutside = null;
   menuRoot.innerHTML = "";
@@ -721,7 +724,7 @@ async function registerAddedProject(dir: string) {
   projectChats.set(dir, projectChats.get(dir) ?? []);
   await refreshAllProjects();
 }
-interface DirListOut { path: string; parent: string | null; home: string; dirs: string[] }
+interface DirListOut { path: string; parent: string | null; home: string; dirs: string[]; truncated: boolean }
 // Universal project picker: searchable one-level filesystem browser with
 // breadcrumbs, / ~ path jump, and a Finder escape hatch.
 function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (dir: string) => void) {
@@ -826,8 +829,16 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
         b.onclick = () => nav(full);
         list.appendChild(b);
       }
+      if (d.truncated) {
+        const t = document.createElement("div");
+        t.className = "pick-empty";
+        t.textContent = "Showing the first 1000 folders.";
+        list.appendChild(t);
+      }
     };
+    let navGen = 0;
     async function nav(path: string) {
+      const gen = ++navGen;
       err.textContent = "";
       let d = cache.get(path);
       if (!d) {
@@ -838,11 +849,20 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
         list.appendChild(l);
         try {
           d = await invoke<DirListOut>("pi_list_dirs", { path });
+          if (gen !== navGen) return;
           cache.set(path, d);
         } catch (e) {
-          err.textContent = e instanceof Error ? e.message : "Couldn't list that folder.";
+          if (gen !== navGen) return;
+          err.textContent = typeof e === "string" && e ? e : e instanceof Error ? e.message : "Couldn't list that folder.";
           const back = cache.get(cur);
           if (back) renderList(back, search.value);
+          else {
+            list.replaceChildren();
+            const f = document.createElement("div");
+            f.className = "pick-empty";
+            f.textContent = "Couldn't load this folder.";
+            list.appendChild(f);
+          }
           return;
         }
       }
@@ -851,9 +871,19 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
       renderCrumbs(d);
       renderList(d, search.value);
     }
+    list.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      const rows = Array.from(list.querySelectorAll<HTMLButtonElement>(".pick-row"));
+      if (rows.length === 0) return;
+      e.preventDefault();
+      const i = rows.indexOf(document.activeElement as HTMLButtonElement);
+      const n = e.key === "ArrowDown" ? (i + 1) % rows.length : (i - 1 + rows.length) % rows.length;
+      rows[n].focus();
+    });
     search.addEventListener("input", () => {
       if (deb !== null) window.clearTimeout(deb);
       deb = window.setTimeout(() => {
+        if (!box.isConnected) return;
         const d = cache.get(cur);
         if (d) renderList(d, search.value);
       }, 150);
@@ -1120,6 +1150,7 @@ function groupSection(name: string, list: { info: SessionInfo; project: string }
     delete g[name];
     saveGroups(g);
     renderProjects();
+    notify({ text: `Deleted group ${name}. Its chats stay in their projects.` });
   };
   row.appendChild(x);
   section.appendChild(row);
@@ -1391,9 +1422,8 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
   menu.setAttribute("aria-label", "Chat actions");
   const buttons: HTMLButtonElement[] = [];
   let sub: HTMLElement | null = null;
-  let subTimer: number | null = null;
-  const clearSubTimer = () => { if (subTimer !== null) { clearTimeout(subTimer); subTimer = null; } };
-  const hideSub = () => { clearSubTimer(); sub?.remove(); sub = null; };
+  const clearSubTimer = () => { if (ctxSubTimer !== null) { clearTimeout(ctxSubTimer); ctxSubTimer = null; } };
+  const hideSub = () => { clearSubTimer(); sub?.remove(); sub = null; trigger.setAttribute("aria-expanded", "false"); };
   const addItem = (label: string, onPick: () => void, checked?: boolean, keepOpen?: boolean) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -1456,13 +1486,22 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     sub.style.left = `${left + w > window.innerWidth - 8 ? Math.max(8, r.left - w - 6) : left}px`;
     let sidx = 0;
     sub.addEventListener("mouseenter", clearSubTimer);
-    sub.addEventListener("mouseleave", hideSub);
+    sub.addEventListener("mouseleave", (e) => {
+      if (e.relatedTarget instanceof Node && anchor.contains(e.relatedTarget)) return;
+      hideSub();
+    });
     sub.addEventListener("keydown", (e) => {
       if (e.key === "Escape" || e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); hideSub(); anchor.focus(); }
-      else if (e.key === "ArrowDown") { e.preventDefault(); sidx = (sidx + 1) % subBtns.length; subBtns[sidx].focus(); }
-      else if (e.key === "ArrowUp") { e.preventDefault(); sidx = (sidx - 1 + subBtns.length) % subBtns.length; subBtns[sidx].focus(); }
+      else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const cur = subBtns.indexOf(document.activeElement as HTMLButtonElement);
+        if (cur !== -1) sidx = cur;
+        sidx = e.key === "ArrowDown" ? (sidx + 1) % subBtns.length : (sidx - 1 + subBtns.length) % subBtns.length;
+        subBtns[sidx].focus();
+      }
       else if (e.key === "Tab") { closeMenu(); }
     });
+    anchor.setAttribute("aria-expanded", "true");
     return subBtns;
   };
   if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
@@ -1471,10 +1510,12 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     if (sub) hideSub();
     else { const btns = showSub(trigger); btns[0]?.focus(); }
   }, false, true);
-  trigger.addEventListener("mouseenter", () => { showSub(trigger); });
+  trigger.setAttribute("aria-haspopup", "menu");
+  trigger.setAttribute("aria-expanded", "false");
+  trigger.addEventListener("mouseenter", () => { clearSubTimer(); if (!sub) showSub(trigger); });
   trigger.addEventListener("mouseleave", () => {
     clearSubTimer();
-    subTimer = window.setTimeout(hideSub, 150);
+    ctxSubTimer = window.setTimeout(hideSub, 150);
   });
   menuRoot.appendChild(menu);
   const w = 240, h = Math.min(menu.offsetHeight || 200, window.innerHeight - 16);
@@ -1662,48 +1703,56 @@ function capMdImgCache() {
     mdImgCache.delete(first);
   }
 }
+// Resolved-path keying: two chats often reference the same relative name
+// (shot.png), so the cache must key on cwd + path, never the raw token.
+function mdFullPath(raw: string): string | null {
+  if (/^https:\/\//i.test(raw)) return raw;
+  if (/^(http:\/\/|data:|javascript:|file:|~)/i.test(raw)) return null;
+  return raw.startsWith("/") ? raw : `${cwd}/${raw}`;
+}
+function mdFallback(img: HTMLImageElement, raw: string) {
+  const alt = img.alt || "image";
+  const label = alt && alt !== "image" ? `${alt} (${raw})` : raw;
+  if (/^https?:\/\//i.test(raw)) {
+    const a = document.createElement("a");
+    a.href = raw;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.className = "md-img-fallback";
+    a.textContent = label;
+    img.replaceWith(a);
+  } else {
+    const s = document.createElement("span");
+    s.className = "md-img-fallback";
+    s.textContent = label;
+    s.title = raw;
+    img.replaceWith(s);
+  }
+}
 function resolveMdImages(root: ParentNode) {
   const imgs = root.querySelectorAll<HTMLImageElement>("img.md-img[data-path]:not([data-done])");
   for (const img of imgs) {
     img.dataset.done = "1";
     const raw = img.dataset.path ?? "";
-    const hit = mdImgCache.get(raw);
+    const full = mdFullPath(raw);
+    if (!full) { mdFallback(img, raw); continue; }
+    const hit = mdImgCache.get(full);
     if (hit) {
       img.src = hit;
       img.addEventListener("click", () => img.classList.toggle("full"));
       continue;
     }
-    void loadMdImage(img, raw);
+    void loadMdImage(img, raw, full);
   }
 }
-async function loadMdImage(img: HTMLImageElement, raw: string) {
-  const alt = img.alt || "image";
-  const fallback = () => {
-    const label = alt && alt !== "image" ? `${alt} (${raw})` : raw;
-    if (/^https?:\/\//i.test(raw)) {
-      const a = document.createElement("a");
-      a.href = raw;
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-      a.className = "md-img-fallback";
-      a.textContent = label;
-      img.replaceWith(a);
-    } else {
-      const s = document.createElement("span");
-      s.className = "md-img-fallback";
-      s.textContent = label;
-      s.title = raw;
-      img.replaceWith(s);
-    }
-  };
-  if (/^https:\/\//i.test(raw)) {
+async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
+  const fallback = () => mdFallback(img, raw);
+  if (/^https:\/\//i.test(full)) {
     img.src = raw;
     img.addEventListener("click", () => img.classList.toggle("full"));
     img.addEventListener("error", fallback, { once: true });
     return;
   }
-  if (/^(http:\/\/|data:|javascript:|file:|~)/i.test(raw)) { fallback(); return; }
-  const full = raw.startsWith("/") ? raw : `${cwd}/${raw}`;
   const ext = full.split(".").pop()?.toLowerCase() ?? "";
   if (!MD_IMG_EXTS.has(ext)) { fallback(); return; }
   try {
@@ -1714,7 +1763,7 @@ async function loadMdImage(img: HTMLImageElement, raw: string) {
     }
     const url = await flight;
     mdImgFlight.delete(full);
-    mdImgCache.set(raw, url);
+    mdImgCache.set(full, url);
     capMdImgCache();
     if (img.isConnected) {
       img.src = url;
@@ -1863,7 +1912,7 @@ async function pickProjectDir(dir: string) {
   await newChatInProject(dir);
 }
 function openGroupPicker(anchor: HTMLElement) {
-  if (!activePath) return;
+  if (!activePath) { notify({ text: "Start or open a chat first — groups need a session to hold." }); return; }
   const path = activePath;
   const groups = loadGroups();
   const items: (MenuItem | "sep")[] = Object.keys(groups).map((n) => ({
@@ -2030,7 +2079,7 @@ function updateSendState() {
 // Session key that owns the live run. Kept until its settle arrives, even if
 // the user has switched away (pi aborts the turn on switch; its leftover
 // events must never render into the visible chat). runningSet drives the
-// pulsing blue dots in the sidebar.
+// unseen-finished blue dots in the sidebar (running rows use the spinner).
 const runningSet = new Set<string>();
 // Chats whose background run finished while you weren't looking. Blue dot
 // until opened. Persisted so it survives app restarts.
@@ -2320,11 +2369,15 @@ function restoreQueueBar() {
   renderQueue();
   const prev = queueSeen.get(vk);
   if (prev) {
+    const same = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+    if (same(prev.steering, queue.steering) && same(prev.followUp, queue.followUp)) return;
     const before = prev.steering.length + prev.followUp.length;
     const now = queue.steering.length + queue.followUp.length;
     if (before > now) {
       const n = before - now;
       notify({ text: `${n} queued message${n === 1 ? " was" : "s were"} delivered while you were away.` });
+    } else {
+      notify({ text: "Queued messages changed while you were away." });
     }
   }
 }
@@ -2365,6 +2418,7 @@ async function openSession(project: string, path: string | null) {
   }
   queueSeen.set(visibleKey(), { steering: [...queue.steering], followUp: [...queue.followUp] });
   capQueueMap(queueSeen, visibleKey());
+  const prevCwd = cwd, prevPath = activePath, prevName = activeName;
   navigating = true; saveDraft(); ++bootGen; updateSendState();
   armWatchdog();
   if (!eventsReady) await initEvents();
@@ -2380,6 +2434,11 @@ async function openSession(project: string, path: string | null) {
     await refreshAllProjects();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
   } catch (e) {
+    // applyState may have retargeted before the throw: roll the scope back so
+    // the (untouched) transcript and queue bar match the visible chat again.
+    cwd = prevCwd; activePath = prevPath; activeName = prevName;
+    chatTitle.textContent = activeName || deriveTitle() || "New chat";
+    renderProjects(); renderChatContext(); renderQueue();
     notify({ text: `Couldn't open chat: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openSession(project, path) });
   } finally { targetScope = null; navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
 }
@@ -2618,12 +2677,13 @@ function sessionLabel(key: string): string | null {
   const list = projectChats.get(c) ?? [];
   const s = list.find((x) => x.path === path);
   const title = s ? s.name || s.preview.slice(0, 42) : path.split("/").filter(Boolean).pop() ?? path;
-  const folder = c.split("/").filter(Boolean).pop() ?? c;
+  const folder = (c === "cwdkey" ? path : c).split("/").filter(Boolean).pop() ?? c;
   return `${title} (${folder})`;
 }
 async function handleEvent(p: PiEvent) {
   const t = p.type;
   if (t === "process_disconnected") {
+    queueCache.clear(); queueSeen.clear();
     ++bootGen; booting = false; setBusy(false); runningSet.clear(); bootError = "pi disconnected. Reconnect to continue; your draft is kept.";
     saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
     showConnError("pi disconnected", () => boot(true)); return;
@@ -2632,6 +2692,7 @@ async function handleEvent(p: PiEvent) {
     // One chat's process died (crash or lazy reaping). Visible chat: reconnect
     // path. Background chat: note it; reopening respawns transparently.
     const key = eventRowKey(p);
+    if (key !== null) { queueCache.delete(key); queueSeen.delete(key); }
     if (key !== null && key === visibleKey()) {
       ++bootGen; booting = false; setBusy(false); runningSet.clear(); bootError = "pi process for this chat exited. Reconnect to continue; your draft is kept.";
       saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
@@ -3100,6 +3161,7 @@ async function boot(_respawn = false): Promise<void> {
       if (gen !== bootGen) return;
       clearRunScope(true); await refreshState();
       if (gen !== bootGen) return;
+      restoreQueueBar();
       booting = false; restoreDraft(); updateSkillPop();
       await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshCommands(); await refreshStats();
       if (gen !== bootGen) return;
