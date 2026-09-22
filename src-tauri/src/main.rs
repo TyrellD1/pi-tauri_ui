@@ -803,6 +803,44 @@ fn pi_list_dirs(path: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+fn pi_read_image(path: String) -> Result<Value, String> {
+    // Render markdown-referenced images: allowlisted raster/vector types only,
+    // resolved path must exist, 10MB cap. Returned as base64 (no asset-protocol
+    // scope or extra capabilities needed).
+    use base64::Engine as _;
+    let canon = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot open {}: {}", path, e))?;
+    if (!canon.is_file()) {
+        return Err(format!("Not a file: {}", path));
+    }
+    let mime = match canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        _ => return Err(format!("Not a supported image: {}", path)),
+    };
+    const MAX: u64 = 10 * 1024 * 1024;
+    let bytes = std::fs::read(&canon).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    if (bytes.len() as u64 > MAX) {
+        return Err("Image is larger than 10MB".to_string());
+    }
+    Ok(serde_json::json!({
+        "path": canon.to_string_lossy(),
+        "mime": mime,
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+#[tauri::command]
 async fn pi_all_projects() -> Result<Value, String> {
     let base = dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"));
     let projects = tokio::task::spawn_blocking(move || {
@@ -923,6 +961,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
+    fn read_image_round_trips_png_and_rejects_non_images() {
+        let base = std::env::temp_dir().join("pi-ui-img-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Minimal 1x1 PNG (signature + IHDR + IDAT + IEND).
+        let png: Vec<u8> = vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 1, 99, 96, 0, 1,
+            0, 0, 5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        std::fs::write(base.join("a.png"), &png).unwrap();
+        std::fs::write(base.join("b.txt"), "nope").unwrap();
+        let out = pi_read_image(base.join("a.png").to_string_lossy().into_owned()).unwrap();
+        assert_eq!(out.pointer("/mime").unwrap().as_str(), Some("image/png"));
+        assert!(!out.pointer("/data").unwrap().as_str().unwrap().is_empty());
+        assert!(pi_read_image(base.join("b.txt").to_string_lossy().into_owned()).is_err());
+        assert!(pi_read_image(base.join("missing.png").to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    #[test]
     fn rejection_is_an_error() {
         assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
@@ -974,7 +1032,8 @@ fn main() {
             pi_ui_response,
             pi_list_sessions,
             pi_all_projects,
-            pi_list_dirs
+            pi_list_dirs,
+            pi_read_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

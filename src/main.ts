@@ -1649,6 +1649,83 @@ function thinkDisclosure(text: string, key: string): HTMLElement {
   return wrap;
 }
 
+// Markdown ![alt](path) placeholders resolve to real images. Local files go
+// through pi_read_image (allowlisted types, 10MB cap); https loads directly;
+// anything else degrades to a link so a weird path never eats content.
+const MD_IMG_EXTS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
+const mdImgCache = new Map<string, string>();
+const mdImgFlight = new Map<string, Promise<string>>();
+function capMdImgCache() {
+  while (mdImgCache.size > 50) {
+    const first = mdImgCache.keys().next().value as string | undefined;
+    if (first === undefined) break;
+    mdImgCache.delete(first);
+  }
+}
+function resolveMdImages(root: ParentNode) {
+  const imgs = root.querySelectorAll<HTMLImageElement>("img.md-img[data-path]:not([data-done])");
+  for (const img of imgs) {
+    img.dataset.done = "1";
+    const raw = img.dataset.path ?? "";
+    const hit = mdImgCache.get(raw);
+    if (hit) {
+      img.src = hit;
+      img.addEventListener("click", () => img.classList.toggle("full"));
+      continue;
+    }
+    void loadMdImage(img, raw);
+  }
+}
+async function loadMdImage(img: HTMLImageElement, raw: string) {
+  const alt = img.alt || "image";
+  const fallback = () => {
+    const label = alt && alt !== "image" ? `${alt} (${raw})` : raw;
+    if (/^https?:\/\//i.test(raw)) {
+      const a = document.createElement("a");
+      a.href = raw;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.className = "md-img-fallback";
+      a.textContent = label;
+      img.replaceWith(a);
+    } else {
+      const s = document.createElement("span");
+      s.className = "md-img-fallback";
+      s.textContent = label;
+      s.title = raw;
+      img.replaceWith(s);
+    }
+  };
+  if (/^https:\/\//i.test(raw)) {
+    img.src = raw;
+    img.addEventListener("click", () => img.classList.toggle("full"));
+    img.addEventListener("error", fallback, { once: true });
+    return;
+  }
+  if (/^(http:\/\/|data:|javascript:|file:|~)/i.test(raw)) { fallback(); return; }
+  const full = raw.startsWith("/") ? raw : `${cwd}/${raw}`;
+  const ext = full.split(".").pop()?.toLowerCase() ?? "";
+  if (!MD_IMG_EXTS.has(ext)) { fallback(); return; }
+  try {
+    let flight = mdImgFlight.get(full);
+    if (!flight) {
+      flight = invoke<{ mime: string; data: string }>("pi_read_image", { path: full }).then((r) => `data:${r.mime};base64,${r.data}`);
+      mdImgFlight.set(full, flight);
+    }
+    const url = await flight;
+    mdImgFlight.delete(full);
+    mdImgCache.set(raw, url);
+    capMdImgCache();
+    if (img.isConnected) {
+      img.src = url;
+      img.addEventListener("click", () => img.classList.toggle("full"));
+      img.addEventListener("error", fallback, { once: true });
+    }
+  } catch {
+    mdImgFlight.delete(full);
+    if (img.isConnected) fallback();
+  }
+}
 function assistantTextBlock(text: string, key: string, images?: { data: string; mime: string }[]): HTMLElement {
   const div = document.createElement("div");
   div.className = "assistant-block";
@@ -1656,6 +1733,7 @@ function assistantTextBlock(text: string, key: string, images?: { data: string; 
     const md = document.createElement("div");
     md.className = "md";
     md.innerHTML = renderMarkdown(text);
+    resolveMdImages(md);
     div.appendChild(md);
   }
   for (const im of images ?? []) {
@@ -1842,7 +1920,7 @@ function renderSettled() {
         let md = view.node.querySelector<HTMLElement>(".md");
         if (!md) { md = document.createElement("div"); md.className = "md"; view.node.prepend(md); }
         // Only the changed prose block is re-parsed; tools and prior prose stay untouched.
-        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) md.innerHTML = renderMarkdown(b.text);
+        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) { md.innerHTML = renderMarkdown(b.text); resolveMdImages(md); }
       }
       view.block = b;
     }

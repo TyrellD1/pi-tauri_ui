@@ -28,6 +28,7 @@ try {
   check('markdown HTML and link attributes are escaped',()=>{const html=renderMarkdown('<img src=x onerror=alert(1)>\n\n[x](https://example.com/"onclick="alert(1))');assert(!html.includes('<img'));assert(!html.includes('"onclick="'));assert(html.includes('&quot;'));});
   check('table cells escape exactly once and preserve inline code pipes',()=>{const html=renderMarkdown('| A | B |\n| --- | --- |\n| <x> & y | `a|b` |');assert(html.includes('&lt;x&gt; &amp; y'));assert(!html.includes('&amp;lt;'));assert(html.includes('<code>a|b</code>'));});
   check('fenced markup remains literal',()=>{const html=renderMarkdown('```html\n<a href="x">**literal**</a>\n```');assert(!html.includes('<strong>'));assert(html.includes('&lt;a'));});
+  check('markdown images become resolvable placeholders',()=>{const html=renderMarkdown('See ![Slide 4](/a/b.png) now');assert(html.includes('class="md-img"'));assert(html.includes('data-path="/a/b.png"'));assert(html.includes('alt="Slide 4"'));assert(!html.includes('src='));});
   const prod=readdirSync('dist/assets').filter(n=>n.endsWith('.js')).map(n=>readFileSync(`dist/assets/${n}`,'utf8')).join('\n');
   check('production bundles exclude preview fixtures',()=>{assert(!prod.includes('Preview scenarios'));assert(!prod.includes('Preview rejection'));assert(!prod.includes('Run UI regression'));});
   console.log(`${count} controller and production checks passed.`);
