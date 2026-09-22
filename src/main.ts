@@ -201,6 +201,7 @@ function hideConnError() {
 interface MenuItem {
   label: string;
   checked?: boolean;
+  title?: string;
   onPick: () => void;
 }
 let menuOutside: ((e: MouseEvent) => void) | null = null;
@@ -214,13 +215,13 @@ function closeMenu() {
     lastFocus = null;
   }
 }
-function openMenu(items: (MenuItem | "sep")[]) {
+function openMenu(items: (MenuItem | "sep")[], at?: { left: number; top: number }, label?: string) {
   lastFocus = document.activeElement as HTMLElement;
   menuRoot.innerHTML = "";
   const menu = document.createElement("div");
   menu.className = "menu";
   menu.setAttribute("role", "menu");
-  menu.setAttribute("aria-label", "Conversation actions");
+  menu.setAttribute("aria-label", label ?? "Conversation actions");
   const buttons: HTMLButtonElement[] = [];
   items.forEach((it) => {
     if (it === "sep") {
@@ -239,6 +240,7 @@ function openMenu(items: (MenuItem | "sep")[]) {
     check.textContent = it.checked ? "✓" : "";
     const lab = document.createElement("span");
     lab.textContent = it.label;
+    if (it.title) b.title = it.title;
     b.appendChild(check);
     b.appendChild(lab);
     b.onclick = () => {
@@ -249,9 +251,16 @@ function openMenu(items: (MenuItem | "sep")[]) {
     buttons.push(b);
   });
   menuRoot.appendChild(menu);
-  const r = menuBtn.getBoundingClientRect();
-  menu.style.top = `${r.bottom + 6}px`;
-  menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  if (at) {
+    menu.style.minWidth = "220px";
+    const h = Math.min(menu.offsetHeight || 200, window.innerHeight - 16);
+    menu.style.top = `${Math.max(8, Math.min(at.top, window.innerHeight - h - 8))}px`;
+    menu.style.left = `${Math.max(8, Math.min(at.left, window.innerWidth - 228))}px`;
+  } else {
+    const r = menuBtn.getBoundingClientRect();
+    menu.style.top = `${r.bottom + 6}px`;
+    menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  }
   menuBtn.setAttribute("aria-expanded", "true");
   let idx = 0;
   buttons[0]?.focus();
@@ -1204,7 +1213,11 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
   menu.setAttribute("role", "menu");
   menu.setAttribute("aria-label", "Chat actions");
   const buttons: HTMLButtonElement[] = [];
-  const addItem = (label: string, onPick: () => void, checked?: boolean) => {
+  let sub: HTMLElement | null = null;
+  let subTimer: number | null = null;
+  const clearSubTimer = () => { if (subTimer !== null) { clearTimeout(subTimer); subTimer = null; } };
+  const hideSub = () => { clearSubTimer(); sub?.remove(); sub = null; };
+  const addItem = (label: string, onPick: () => void, checked?: boolean, keepOpen?: boolean) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "menu-item";
@@ -1216,35 +1229,76 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     lab.textContent = label;
     b.appendChild(check);
     b.appendChild(lab);
-    b.onclick = () => { closeMenu(); onPick(); };
+    b.onclick = () => { if (keepOpen) onPick(); else { closeMenu(); onPick(); } };
     menu.appendChild(b);
     buttons.push(b);
     return b;
   };
-  const renderMain = () => {
-    menu.replaceChildren(); buttons.length = 0;
-    if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
-    if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
-    addItem("Add to group ›", renderGroups);
-  };
-  const renderGroups = () => {
-    menu.replaceChildren(); buttons.length = 0;
+  const showSub = (anchor: HTMLButtonElement) => {
+    clearSubTimer();
+    hideSub();
     const groups = loadGroups();
     const names = Object.keys(groups);
-    addItem("‹ Back", renderMain);
+    sub = document.createElement("div");
+    sub.className = "menu ctx-sub";
+    sub.setAttribute("role", "menu");
+    sub.setAttribute("aria-label", "Groups");
+    const subBtns: HTMLButtonElement[] = [];
+    const mk = (label: string, onPick: () => void, checked?: boolean) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "menu-item";
+      b.setAttribute("role", "menuitem");
+      const check = document.createElement("span");
+      check.className = "check";
+      check.textContent = checked ? "✓" : "";
+      const lab = document.createElement("span");
+      lab.textContent = label;
+      b.appendChild(check);
+      b.appendChild(lab);
+      b.onclick = () => { closeMenu(); onPick(); };
+      sub!.appendChild(b);
+      subBtns.push(b);
+      return b;
+    };
     if (names.length === 0) {
       const e = document.createElement("div");
       e.className = "menu-note";
       e.textContent = "No groups yet.";
-      menu.appendChild(e);
+      sub.appendChild(e);
     }
-    for (const n of names) {
-      const member = groups[n].includes(target.path);
-      addItem(n, () => toggleGroupMember(n, target.path), member);
-    }
-    addItem("＋ New group", () => openNewGroup(target.path));
+    for (const n of names) mk(n, () => toggleGroupMember(n, target.path), groups[n].includes(target.path));
+    mk("＋ New group", () => openNewGroup(target.path));
+    menuRoot.appendChild(sub);
+    const r = anchor.getBoundingClientRect();
+    const w = 220;
+    sub.style.minWidth = `${w}px`;
+    const sh = Math.min(sub.offsetHeight || 200, window.innerHeight - 16);
+    sub.style.top = `${Math.max(8, Math.min(r.top - 6, window.innerHeight - sh - 8))}px`;
+    const left = r.right + 6;
+    sub.style.left = `${left + w > window.innerWidth - 8 ? Math.max(8, r.left - w - 6) : left}px`;
+    let sidx = 0;
+    sub.addEventListener("mouseenter", clearSubTimer);
+    sub.addEventListener("mouseleave", hideSub);
+    sub.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" || e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); hideSub(); anchor.focus(); }
+      else if (e.key === "ArrowDown") { e.preventDefault(); sidx = (sidx + 1) % subBtns.length; subBtns[sidx].focus(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); sidx = (sidx - 1 + subBtns.length) % subBtns.length; subBtns[sidx].focus(); }
+      else if (e.key === "Tab") { closeMenu(); }
+    });
+    return subBtns;
   };
-  renderMain();
+  if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
+  if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
+  const trigger = addItem("Add to group ›", () => {
+    if (sub) hideSub();
+    else { const btns = showSub(trigger); btns[0]?.focus(); }
+  }, false, true);
+  trigger.addEventListener("mouseenter", () => { showSub(trigger); });
+  trigger.addEventListener("mouseleave", () => {
+    clearSubTimer();
+    subTimer = window.setTimeout(hideSub, 150);
+  });
   menuRoot.appendChild(menu);
   const w = 240, h = Math.min(menu.offsetHeight || 200, window.innerHeight - 16);
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - h - 8))}px`;
@@ -1256,10 +1310,15 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); }
     else if (e.key === "ArrowDown") { e.preventDefault(); idx = (idx + 1) % buttons.length; buttons[idx].focus(); }
     else if (e.key === "ArrowUp") { e.preventDefault(); idx = (idx - 1 + buttons.length) % buttons.length; buttons[idx].focus(); }
+    else if (e.key === "ArrowRight" && document.activeElement === trigger) {
+      e.preventDefault();
+      const btns = sub ? Array.from(sub.querySelectorAll<HTMLButtonElement>("button")) : showSub(trigger);
+      btns[0]?.focus();
+    }
     else if (e.key === "Tab") { closeMenu(); }
   });
   menuOutside = (e: MouseEvent) => {
-    if (!menu.contains(e.target as Node)) closeMenu();
+    if (!menu.contains(e.target as Node) && !(sub && sub.contains(e.target as Node))) closeMenu();
   };
   document.addEventListener("mousedown", menuOutside);
 }
@@ -1504,6 +1563,68 @@ function resetView() {
   rendered.clear(); fullTextByKey.clear(); expandedTools.clear(); showThinkingFor.clear();
   messagesInner.replaceChildren();
 }
+// ---------- new-chat context badges: project + groups, both changeable ----------
+function chatContextBar(): HTMLElement {
+  const bar = document.createElement("div");
+  bar.className = "ctx-bar";
+  const pb = document.createElement("button");
+  pb.type = "button";
+  pb.className = "ctx-badge";
+  const pk = document.createElement("span");
+  pk.className = "ctx-kind";
+  pk.textContent = "project";
+  const pn = document.createElement("span");
+  pn.textContent = baseName(cwd);
+  pb.appendChild(pk);
+  pb.appendChild(pn);
+  pb.title = `Project folder: ${cwd} — click to change`;
+  pb.setAttribute("aria-label", `Project ${baseName(cwd)}. Activate to change project.`);
+  pb.onclick = () => openProjectPicker(pb);
+  bar.appendChild(pb);
+  if (activePath) {
+    const groups = loadGroups();
+    for (const n of Object.keys(groups)) {
+      if (!groups[n].includes(activePath)) continue;
+      const gb = document.createElement("button");
+      gb.type = "button";
+      gb.className = "ctx-badge";
+      const gk = document.createElement("span");
+      gk.className = "ctx-kind";
+      gk.textContent = "group";
+      const gn = document.createElement("span");
+      gn.textContent = n;
+      gb.appendChild(gk);
+      gb.appendChild(gn);
+      gb.title = `Group ${n} — click to change`;
+      gb.setAttribute("aria-label", `Group ${n}. Activate to change groups.`);
+      gb.onclick = () => openGroupPicker(gb);
+      bar.appendChild(gb);
+    }
+  }
+  return bar;
+}
+function openProjectPicker(anchor: HTMLElement) {
+  const r = anchor.getBoundingClientRect();
+  openMenu(getProjects().map((p) => ({
+    label: baseName(p),
+    title: p,
+    checked: p === cwd,
+    onPick: () => { if (p !== cwd) newChatInProject(p); },
+  })), { left: r.left, top: r.bottom + 6 }, "Choose project");
+}
+function openGroupPicker(anchor: HTMLElement) {
+  if (!activePath) return;
+  const path = activePath;
+  const groups = loadGroups();
+  const items: (MenuItem | "sep")[] = Object.keys(groups).map((n) => ({
+    label: n,
+    checked: groups[n].includes(path),
+    onPick: () => { toggleGroupMember(n, path); renderSettled(); },
+  }));
+  items.push("sep", { label: "＋ New group", onPick: () => openNewGroup(path) });
+  const r = anchor.getBoundingClientRect();
+  openMenu(items, { left: r.left, top: r.bottom + 6 }, "Choose groups");
+}
 function renderSettled() {
   if (booting || bootError) {
     resetView();
@@ -1518,6 +1639,7 @@ function renderSettled() {
   messagesInner.querySelector(".empty-state")?.remove();
   if (!list.length) {
     const d = document.createElement("div"); d.className = "empty-state";
+    d.appendChild(chatContextBar());
     const h = document.createElement("h2"); h.textContent = "What would you like to work on?";
     const f = document.createElement("div"); f.className = "empty-folder"; f.textContent = cwd; f.title = cwd;
     const row = document.createElement("div"); row.className = "empty-actions";
@@ -2451,7 +2573,7 @@ function skillTrigger(): { start: number; query: string } | null {
 function updateSkillPop() {
   const trig = skillTrigger();
   const skills = commandCache.get(cwd) ?? [];
-  if (!trig || skills.length === 0) { hideSkillPop(); return; }
+  if (!trig || !trig.query || skills.length === 0) { hideSkillPop(); return; }
   const sig = `${trig.start}:${trig.query}`;
   if (sig === skillSig && skillPopOpen()) return;
   skillSig = sig;
