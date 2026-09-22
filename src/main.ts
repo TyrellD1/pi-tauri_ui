@@ -26,6 +26,7 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
 
 const chatListEl = $("chat-list");
+const chatContextEl = $("chat-context");
 const messagesEl = $("messages");
 const messagesInner = $("messages-inner");
 const inputEl = $("input") as HTMLTextAreaElement;
@@ -604,13 +605,14 @@ function groupClosed(): Set<string> {
   } catch { return new Set(); }
 }
 function saveGroupClosed(s: Set<string>) { prefSet("pi-groups-closed", JSON.stringify([...s])); }
-function parentsOpen(): { groups: boolean; projects: boolean } {
+type ParentState = { groups: boolean; projects: boolean; recent: boolean };
+function parentsOpen(): ParentState {
   try {
-    const o = JSON.parse(prefGet("pi-parents") ?? "{}") as { groups?: boolean; projects?: boolean };
-    return { groups: o.groups !== false, projects: o.projects !== false };
-  } catch { return { groups: true, projects: true }; }
+    const o = JSON.parse(prefGet("pi-parents") ?? "{}") as Partial<ParentState>;
+    return { groups: o.groups !== false, projects: o.projects !== false, recent: o.recent === true };
+  } catch { return { groups: true, projects: true, recent: false }; }
 }
-function saveParents(p: { groups: boolean; projects: boolean }) { prefSet("pi-parents", JSON.stringify(p)); }
+function saveParents(p: ParentState) { prefSet("pi-parents", JSON.stringify(p)); }
 function findProjectForPath(path: string): string | null {
   for (const [c, list] of projectChats) if (list.some((s) => s.path === path)) return c;
   if (sessions.some((s) => s.path === path)) return cwd;
@@ -959,10 +961,11 @@ function renderProjects() {
   const q = filter.trim().toLowerCase();
   chatListEl.innerHTML = "";
   const parents = parentsOpen();
+  renderRecentParent(q, parents.recent);
   renderGroupsParent(q, parents.groups);
   renderProjectsParent(q, parents.projects);
 }
-function parentHead(title: string, key: "groups" | "projects", isOpen: boolean, extra: HTMLElement | null): HTMLElement {
+function parentHead(title: string, key: keyof ParentState, isOpen: boolean, extra: HTMLElement | null): HTMLElement {
   const row = document.createElement("div");
   row.className = "p-row parent-row";
   const head = document.createElement("button");
@@ -996,6 +999,53 @@ function miniButton(label: string, title: string, onClick: () => void): HTMLButt
   b.setAttribute("aria-label", title);
   b.onclick = onClick;
   return b;
+}
+let recentExpanded = false;
+// Most recent chats across every project and group, newest first.
+function recentChats(q: string): { info: SessionInfo; project: string }[] {
+  const seen = new Set<string>();
+  const all: { info: SessionInfo; project: string }[] = [];
+  const push = (project: string, info: SessionInfo) => {
+    if (seen.has(info.path)) return;
+    seen.add(info.path);
+    if (!chatMatches(info, q)) return;
+    all.push({ info, project });
+  };
+  for (const s of sessions) push(cwd, s);
+  for (const [c, list] of projectChats) for (const s of list) push(c, s);
+  all.sort((a, b) => b.info.mtime - a.info.mtime);
+  return all;
+}
+function renderRecentParent(q: string, isOpen: boolean) {
+  const section = document.createElement("div");
+  section.className = "parent-section";
+  section.setAttribute("role", "group");
+  section.setAttribute("aria-label", "Recent");
+  section.appendChild(parentHead("Recent", "recent", isOpen, null));
+  chatListEl.appendChild(section);
+  if (!isOpen) return;
+  const body = document.createElement("div");
+  body.className = "parent-body";
+  section.appendChild(body);
+  const all = recentChats(q);
+  const shown = all.slice(0, recentExpanded ? 15 : 5);
+  if (shown.length === 0) {
+    const e = document.createElement("div");
+    e.className = "project-empty";
+    e.textContent = q ? "No recent matches." : "No chats yet.";
+    body.appendChild(e);
+    return;
+  }
+  for (const { info, project } of shown) body.appendChild(chatButton(info, project));
+  if (all.length > 5) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "show-more";
+    more.textContent = recentExpanded ? "Show less" : `Show ${Math.min(all.length, 15) - 5} more`;
+    more.setAttribute("aria-expanded", String(recentExpanded));
+    more.onclick = () => { recentExpanded = !recentExpanded; renderProjects(); };
+    body.appendChild(more);
+  }
 }
 function renderGroupsParent(q: string, isOpen: boolean) {
   const groups = loadGroups();
@@ -1747,7 +1797,9 @@ function openGroupPicker(anchor: HTMLElement) {
   const r = anchor.getBoundingClientRect();
   openMenu(items, { left: r.left, top: r.bottom + 6 }, "Choose groups");
 }
+function renderChatContext() { chatContextEl.replaceChildren(chatContextBar()); }
 function renderSettled() {
+  renderChatContext();
   if (booting || bootError) {
     resetView();
     const d = document.createElement("div"); d.className = "empty-state";
@@ -1761,7 +1813,6 @@ function renderSettled() {
   messagesInner.querySelector(".empty-state")?.remove();
   if (!list.length) {
     const d = document.createElement("div"); d.className = "empty-state";
-    d.appendChild(chatContextBar());
     const h = document.createElement("h2"); h.textContent = "What would you like to work on?";
     const f = document.createElement("div"); f.className = "empty-folder"; f.textContent = cwd; f.title = cwd;
     const row = document.createElement("div"); row.className = "empty-actions";
