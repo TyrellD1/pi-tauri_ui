@@ -164,6 +164,12 @@ export function installPreview() {
       check('Stop settles without silently clearing queue',$('btn-stop').classList.contains('hidden') && $('queue-bar').textContent!.includes('queued after this'));
       $('queue-bar').querySelector<HTMLButtonElement>('button')!.click();await sleep();
       check('explicit Clear empties queue',$('queue-bar').classList.contains('hidden'));
+      type('bg task');$('btn-send').click();await sleep(60);
+      type('queued while running');$('btn-queue').click();await sleep(50);
+      $('chat-list').querySelectorAll<HTMLButtonElement>('.chat-item')[1].click();await sleep(80);
+      check('queue hidden on other chat',$('queue-bar').classList.contains('hidden'));
+      $('chat-list').querySelectorAll<HTMLButtonElement>('.chat-item')[0].click();await sleep(80);
+      check('queue survives chat switch',$('queue-bar').textContent!.includes('queued while running'));
       const home=$('chat-list').querySelector<HTMLButtonElement>('.chat-item')!;home.click();await sleep(80);
       type('');
       const data=new DataTransfer();data.items.add(new File([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jbasAAAAASUVORK5CYII='),c=>c.charCodeAt(0))],'test.png',{type:'image/png'}));

@@ -80,6 +80,20 @@ let filter = "", visibleLimit = 100, debounceT: number | null = null, stickToBot
 let pendingImages: PendingImage[] = [];
 const expandedTools = new Set<string>(), showThinkingFor = new Set<string>(), fullTextByKey = new Map<string, string>();
 let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
+// Per-chat queue truth. Server queues live in each chat's process and survive
+// switching; the display var above is reset on every open, so the cache below
+// restores the bar (and reports away-deliveries). Memory-only: processes die
+// on quit, so there is nothing to restore across restarts.
+type QueueLists = { steering: string[]; followUp: string[] };
+const queueCache = new Map<string, QueueLists>();
+const queueSeen = new Map<string, QueueLists>();
+function capQueueMap(m: Map<string, QueueLists>, keep: string) {
+  while (m.size > 200) {
+    const first = m.keys().next().value as string | undefined;
+    if (first === undefined || first === keep) break;
+    m.delete(first);
+  }
+}
 let extStatus = "", lastFocus: HTMLElement | null = null;
 let sessionsErrShown = false, modelsErrShown = false;
 const MAX_IMAGES = 6, MAX_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -2059,6 +2073,24 @@ async function doClearQueue() {
   }
 }
 
+// Restore this chat's queue bar from cache after an open. If items drained
+// while we were looking elsewhere, say so — otherwise a delivered follow-up
+// looks like a message that sent itself.
+function restoreQueueBar() {
+  const vk = visibleKey();
+  const cached = queueCache.get(vk);
+  queue = cached ? { steering: [...cached.steering], followUp: [...cached.followUp] } : { steering: [], followUp: [] };
+  renderQueue();
+  const prev = queueSeen.get(vk);
+  if (prev) {
+    const before = prev.steering.length + prev.followUp.length;
+    const now = queue.steering.length + queue.followUp.length;
+    if (before > now) {
+      const n = before - now;
+      notify({ text: `${n} queued message${n === 1 ? " was" : "s were"} delivered while you were away.` });
+    }
+  }
+}
 function renderQueue() {
   const { steering, followUp } = queue;
   if (steering.length + followUp.length === 0) {
@@ -2094,6 +2126,8 @@ async function openSession(project: string, path: string | null) {
     if (unseenFinished.delete(`${project}:${path}`)) { saveUnseen(); renderProjects(); }
     return;
   }
+  queueSeen.set(visibleKey(), { steering: [...queue.steering], followUp: [...queue.followUp] });
+  capQueueMap(queueSeen, visibleKey());
   navigating = true; saveDraft(); ++bootGen; updateSendState();
   armWatchdog();
   if (!eventsReady) await initEvents();
@@ -2103,6 +2137,7 @@ async function openSession(project: string, path: string | null) {
     if (activePath === null) throw new Error("pi returned no session");
     if (unseenFinished.delete(visibleKey())) saveUnseen();
     clearRunScope(true); restoreDraft(); updateSkillPop();
+    restoreQueueBar();
     await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshCommands(); await refreshStats();
     expandedProjects.add(project); saveExpanded();
     await refreshAllProjects();
@@ -2375,8 +2410,13 @@ async function handleEvent(p: PiEvent) {
   const isVis = key === null || key === visibleKey();
   if (isVis && (t === "agent_start" || t === "agent_settled" || t.startsWith("message_") || t.startsWith("tool_execution_"))) pokeProgress();
   if (t === "queue_update") {
+    const lists = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] };
+    if (key !== null) {
+      queueCache.set(key, lists);
+      capQueueMap(queueCache, key);
+    }
     if (!isVis) return;
-    queue = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] }; renderQueue(); return;
+    queue = lists; renderQueue(); return;
   }
   if (t === "agent_start") {
     if (key !== null) { runningSet.add(key); unseenFinished.delete(key); saveUnseen(); }
