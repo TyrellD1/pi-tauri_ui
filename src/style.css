@@ -544,6 +544,20 @@ body.hide-tools .tool-disclosure[data-failed="true"] { display: block; }
   border: 1px solid var(--line); color: var(--ink);
   box-shadow: 0 12px 40px rgba(0,0,0,0.18);
 }
+.modal.wide { width: 620px; }
+.crumbs { display: flex; gap: 1px; flex-wrap: wrap; align-items: center; margin: 2px 0 8px 0; font-size: 12.5px; }
+.crumbs button { border: none; background: none; color: var(--muted); cursor: pointer; padding: 3px 6px; border-radius: 6px; font: inherit; }
+.crumbs button:hover { background: var(--surface-deep); color: var(--ink); }
+.crumbs .cur { color: var(--ink); font-weight: 600; padding: 3px 6px; }
+.crumbs .sep { color: var(--quiet); }
+.pick-list { border: 1px solid var(--line); border-radius: 9px; max-height: 300px; overflow: auto; margin-top: 8px; background: var(--page); }
+.pick-row { display: flex; width: 100%; text-align: left; border: none; border-bottom: 1px solid var(--line); background: none; color: var(--ink); font: inherit; font-size: 13px; padding: 8px 12px; cursor: pointer; }
+.pick-row:last-child { border-bottom: none; }
+.pick-row:hover { background: var(--surface); }
+.pick-empty { padding: 12px; color: var(--quiet); font-size: 12.5px; }
+.pick-error { font-size: 12px; color: var(--error); margin-top: 8px; }
+.pick-error:empty { display: none; }
+.dialog-actions button.left { margin-right: auto; }
 .modal h3 { margin: 0 0 4px 0; font-size: 14px; font-weight: 600; }
 .modal p.muted { color: var(--quiet); font-size: 12px; margin: 0 0 12px 0; }
 .modal label { display: block; font-size: 12px; font-weight: 600; margin: 10px 0 4px 0; }

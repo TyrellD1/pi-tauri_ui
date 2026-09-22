@@ -769,6 +769,40 @@ fn resolve_slug(slug: &str) -> Option<String> {
 /// its folder (`cwd: null` when the folder is gone) with its chats inside.
 /// The sidebar renders this directly — no manual registration needed.
 #[tauri::command]
+fn pi_list_dirs(path: String) -> Result<Value, String> {
+    // Universal folder picker backend: child directories of any path.
+    // Synchronous std::fs read — one directory level, capped, no recursion.
+    let canon = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot open {}: {}", path, e))?;
+    if (!canon.is_dir()) {
+        return Err(format!("Not a folder: {}", path));
+    }
+    let entries = std::fs::read_dir(&canon).map_err(|e| format!("Cannot list {}: {}", path, e))?;
+    let mut dirs: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        if (dirs.len() >= 1000) {
+            break;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with('.')) {
+            continue;
+        }
+        if (entry.file_type().map(|t| t.is_dir()).unwrap_or(false)) {
+            dirs.push(entry.path().to_string_lossy().into_owned());
+        }
+    }
+    dirs.sort_by_key(|s| s.to_lowercase());
+    Ok(serde_json::json!({
+        "path": canon.to_string_lossy(),
+        "parent": canon.parent().map(|p| p.to_string_lossy().into_owned()),
+        "home": dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string()),
+        "dirs": dirs,
+    }))
+}
+
+#[tauri::command]
 async fn pi_all_projects() -> Result<Value, String> {
     let base = dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"));
     let projects = tokio::task::spawn_blocking(move || {
@@ -872,6 +906,23 @@ mod tests {
         assert!(!matches_scope(None, "/b", "/a", None));
     }
     #[test]
+    fn list_dirs_lists_only_visible_subdirs() {
+        let base = std::env::temp_dir().join("pi-ui-picker-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("b-sub")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+        std::fs::create_dir_all(base.join("a-sub")).unwrap();
+        std::fs::write(base.join("file.txt"), "x").unwrap();
+        let out = pi_list_dirs(base.to_string_lossy().into_owned()).unwrap();
+        let dirs = out.pointer("/dirs").unwrap().as_array().unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].as_str().unwrap().ends_with("a-sub"));
+        assert!(dirs[1].as_str().unwrap().ends_with("b-sub"));
+        assert!(out.pointer("/parent").unwrap().as_str().is_some());
+        assert!(pi_list_dirs(base.join("nope").to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    #[test]
     fn rejection_is_an_error() {
         assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
@@ -922,7 +973,8 @@ fn main() {
             pi_set_name,
             pi_ui_response,
             pi_list_sessions,
-            pi_all_projects
+            pi_all_projects,
+            pi_list_dirs
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

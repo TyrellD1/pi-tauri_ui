@@ -354,13 +354,13 @@ function closeModal() {
     modalPrevFocus = null;
   }
 }
-function openModal(title: string, build: (body: HTMLElement, close: () => void) => void) {
+function openModal(title: string, build: (body: HTMLElement, close: () => void) => void, opts?: { wide?: boolean }) {
   modalPrevFocus = document.activeElement as HTMLElement;
   modalRoot.innerHTML = "";
   const back = document.createElement("div");
   back.className = "modal-back";
   const box = document.createElement("div");
-  box.className = "modal";
+  box.className = "modal" + (opts?.wide ? " wide" : "");
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-modal", "true");
   box.setAttribute("aria-label", title);
@@ -709,69 +709,181 @@ async function refreshAllProjects() {
   renderProjects();
 }
 
-function openAddProject() {
-  openModal("Add project", (box, close) => {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Existing projects appear automatically. Add a brand-new folder here to point pi at it before it has any chats.";
-    const lab = document.createElement("label");
-    lab.textContent = "Project folder";
-    lab.setAttribute("for", "m-project");
-    const pathRow = document.createElement("div");
-    pathRow.className = "path-row";
-    const inp = document.createElement("input");
-    inp.id = "m-project";
-    inp.placeholder = "/Users/you/workspace_a/projects/…";
-    const browse = document.createElement("button");
-    browse.type = "button";
-    browse.textContent = "Browse…";
-    browse.title = "Choose a folder in Finder";
-    browse.onclick = async () => {
+async function registerAddedProject(dir: string) {
+  const added = addedProjects();
+  if (!added.includes(dir)) prefSet("pi-added-projects", JSON.stringify([...added, dir]));
+  const hidden = hiddenProjects();
+  if (hidden.delete(dir)) prefSet("pi-hidden-projects", JSON.stringify([...hidden]));
+  expandedProjects.add(dir);
+  saveExpanded();
+  projectChats.set(dir, projectChats.get(dir) ?? []);
+  await refreshAllProjects();
+}
+interface DirListOut { path: string; parent: string | null; home: string; dirs: string[] }
+// Universal project picker: searchable one-level filesystem browser with
+// breadcrumbs, / ~ path jump, and a Finder escape hatch.
+function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (dir: string) => void) {
+  openModal("Choose project folder", (box, close) => {
+    const crumbs = document.createElement("div");
+    crumbs.className = "crumbs";
+    crumbs.setAttribute("aria-label", "Current folder");
+    const search = document.createElement("input");
+    search.placeholder = "Search folders here, or type a path starting with / or ~";
+    search.setAttribute("aria-label", "Search folders or type a path");
+    search.setAttribute("autocomplete", "off");
+    search.setAttribute("spellcheck", "false");
+    const list = document.createElement("div");
+    list.className = "pick-list";
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Folders");
+    const err = document.createElement("div");
+    err.className = "pick-error";
+    err.setAttribute("role", "status");
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const finder = document.createElement("button");
+    finder.type = "button";
+    finder.className = "left";
+    finder.textContent = "Browse in Finder…";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.onclick = close;
+    const select = document.createElement("button");
+    select.type = "button";
+    select.className = "primary";
+    select.textContent = selectLabel;
+    row.appendChild(finder);
+    row.appendChild(cancel);
+    row.appendChild(select);
+    box.appendChild(crumbs);
+    box.appendChild(search);
+    box.appendChild(list);
+    box.appendChild(err);
+    box.appendChild(row);
+    let cur = startDir;
+    let home = "";
+    const cache = new Map<string, DirListOut>();
+    let deb: number | null = null;
+    const isJump = (s: string) => s.startsWith("/") || s === "~" || s.startsWith("~/");
+    const resolveJump = (s: string): string | null => {
+      if (s === "~") return home || null;
+      if (s.startsWith("~/")) return home ? home + s.slice(1) : null;
+      return s;
+    };
+    const renderCrumbs = (d: DirListOut) => {
+      crumbs.replaceChildren();
+      const root = document.createElement("button");
+      root.type = "button";
+      root.textContent = "/";
+      root.title = "Go to /";
+      root.onclick = () => nav("/");
+      crumbs.appendChild(root);
+      const parts = d.path.split("/").filter(Boolean);
+      parts.forEach((seg, i) => {
+        const sep = document.createElement("span");
+        sep.className = "sep";
+        sep.textContent = "›";
+        crumbs.appendChild(sep);
+        if (i === parts.length - 1) {
+          const s = document.createElement("span");
+          s.className = "cur";
+          s.textContent = seg;
+          crumbs.appendChild(s);
+        } else {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = seg;
+          b.title = "/" + parts.slice(0, i + 1).join("/");
+          b.onclick = () => nav("/" + parts.slice(0, i + 1).join("/"));
+          crumbs.appendChild(b);
+        }
+      });
+    };
+    const renderList = (d: DirListOut, q: string) => {
+      list.replaceChildren();
+      const trimmed = q.trim();
+      const query = trimmed.toLowerCase();
+      const items = query && !isJump(trimmed) ? d.dirs.filter((p) => baseName(p).toLowerCase().includes(query)) : d.dirs;
+      if (items.length === 0) {
+        const e = document.createElement("div");
+        e.className = "pick-empty";
+        e.textContent = query ? "No folders match." : "No subfolders here — pick this folder or go up.";
+        list.appendChild(e);
+        return;
+      }
+      for (const full of items) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "pick-row";
+        b.setAttribute("role", "option");
+        b.title = full;
+        const name = document.createElement("span");
+        name.textContent = baseName(full);
+        b.appendChild(name);
+        b.onclick = () => nav(full);
+        list.appendChild(b);
+      }
+    };
+    async function nav(path: string) {
+      err.textContent = "";
+      let d = cache.get(path);
+      if (!d) {
+        list.replaceChildren();
+        const l = document.createElement("div");
+        l.className = "pick-empty";
+        l.textContent = "Loading…";
+        list.appendChild(l);
+        try {
+          d = await invoke<DirListOut>("pi_list_dirs", { path });
+          cache.set(path, d);
+        } catch (e) {
+          err.textContent = e instanceof Error ? e.message : "Couldn't list that folder.";
+          const back = cache.get(cur);
+          if (back) renderList(back, search.value);
+          return;
+        }
+      }
+      cur = d.path;
+      home = d.home || home;
+      renderCrumbs(d);
+      renderList(d, search.value);
+    }
+    search.addEventListener("input", () => {
+      if (deb !== null) window.clearTimeout(deb);
+      deb = window.setTimeout(() => {
+        const d = cache.get(cur);
+        if (d) renderList(d, search.value);
+      }, 150);
+    });
+    search.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || e.isComposing) return;
+      const v = search.value.trim();
+      if (isJump(v)) {
+        const dest = resolveJump(v);
+        if (dest) { e.preventDefault(); search.value = ""; nav(dest); }
+        return;
+      }
+      const d = cache.get(cur);
+      if (!d) return;
+      const query = v.toLowerCase();
+      const items = query ? d.dirs.filter((p) => baseName(p).toLowerCase().includes(query)) : d.dirs;
+      if (items.length === 1) { e.preventDefault(); search.value = ""; nav(items[0]); }
+    });
+    finder.onclick = async () => {
       try {
         const picked = await openFolderPicker({ directory: true, multiple: false, title: "Choose project folder" });
-        if (typeof picked === "string" && picked) {
-          inp.value = picked;
-          inp.focus();
-        }
+        if (typeof picked === "string" && picked) nav(picked);
       } catch {
         notify({ text: "Couldn't open the folder picker." });
       }
     };
-    pathRow.appendChild(inp);
-    pathRow.appendChild(browse);
-    const row = document.createElement("div");
-    row.className = "dialog-actions";
-    const c = document.createElement("button");
-    c.type = "button";
-    c.textContent = "Cancel";
-    c.onclick = close;
-    const s = document.createElement("button");
-    s.type = "button";
-    s.textContent = "Add";
-    s.className = "primary";
-    s.onclick = async () => {
-      const path = inp.value.trim();
-      close();
-      if (!path) return;
-      const added = addedProjects();
-      if (!added.includes(path)) prefSet("pi-added-projects", JSON.stringify([...added, path]));
-      const hidden = hiddenProjects();
-      if (hidden.delete(path)) prefSet("pi-hidden-projects", JSON.stringify([...hidden]));
-      expandedProjects.add(path);
-      saveExpanded();
-      projectChats.set(path, projectChats.get(path) ?? []);
-      await refreshAllProjects();
-    };
-    row.appendChild(c);
-    row.appendChild(s);
-    box.appendChild(p);
-    box.appendChild(lab);
-    box.appendChild(pathRow);
-    box.appendChild(row);
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) s.click();
-    });
-  });
+    select.onclick = () => { close(); onPick(cur); };
+    nav(startDir);
+  }, { wide: true });
+}
+function openAddProject() {
+  openProjectPickerModal(cwd, "Add project", (dir) => { void registerAddedProject(dir); });
 }
 
 function removeProject(project: string) {
@@ -1027,6 +1139,7 @@ async function newChatInGroup(group: string) {
   if (!g[group].includes(path)) { g[group].push(path); saveGroups(g); }
   notify({ text: `New chat in ${baseName(project)} · added to ${group}.` });
   renderProjects();
+  renderSettled();
 }
 function renderProjectsParent(q: string, isOpen: boolean) {
   const projects = getProjects();
@@ -1593,38 +1706,33 @@ function chatContextBar(): HTMLElement {
   pb.appendChild(pn);
   pb.title = `Project folder: ${cwd} — click to change`;
   pb.setAttribute("aria-label", `Project ${baseName(cwd)}. Activate to change project.`);
-  pb.onclick = () => openProjectPicker(pb);
+  pb.onclick = () => openProjectPickerModal(cwd, "Start chat here", (dir) => { void pickProjectDir(dir); });
   bar.appendChild(pb);
-  if (activePath) {
-    const groups = loadGroups();
-    for (const n of Object.keys(groups)) {
-      if (!groups[n].includes(activePath)) continue;
-      const gb = document.createElement("button");
-      gb.type = "button";
-      gb.className = "ctx-badge";
-      const gk = document.createElement("span");
-      gk.className = "ctx-kind";
-      gk.textContent = "group";
-      const gn = document.createElement("span");
-      gn.textContent = n;
-      gb.appendChild(gk);
-      gb.appendChild(gn);
-      gb.title = `Group ${n} — click to change`;
-      gb.setAttribute("aria-label", `Group ${n}. Activate to change groups.`);
-      gb.onclick = () => openGroupPicker(gb);
-      bar.appendChild(gb);
-    }
+  const groups = loadGroups();
+  const ap = activePath;
+  const memberOf = ap ? Object.keys(groups).filter((n) => groups[n].includes(ap)) : [];
+  const shown: (string | null)[] = memberOf.length > 0 ? memberOf : [null];
+  for (const n of shown) {
+    const gb = document.createElement("button");
+    gb.type = "button";
+    gb.className = "ctx-badge";
+    const gk = document.createElement("span");
+    gk.className = "ctx-kind";
+    gk.textContent = "group";
+    const gn = document.createElement("span");
+    gn.textContent = n ?? "+ Add";
+    gb.appendChild(gk);
+    gb.appendChild(gn);
+    gb.title = n ? `Group ${n} — click to change` : "Add this chat to a group";
+    gb.setAttribute("aria-label", n ? `Group ${n}. Activate to change groups.` : "No group. Activate to add this chat to a group.");
+    gb.onclick = () => openGroupPicker(gb);
+    bar.appendChild(gb);
   }
   return bar;
 }
-function openProjectPicker(anchor: HTMLElement) {
-  const r = anchor.getBoundingClientRect();
-  openMenu(getProjects().map((p) => ({
-    label: baseName(p),
-    title: p,
-    checked: p === cwd,
-    onPick: () => { if (p !== cwd) newChatInProject(p); },
-  })), { left: r.left, top: r.bottom + 6 }, "Choose project");
+async function pickProjectDir(dir: string) {
+  await registerAddedProject(dir);
+  await newChatInProject(dir);
 }
 function openGroupPicker(anchor: HTMLElement) {
   if (!activePath) return;
