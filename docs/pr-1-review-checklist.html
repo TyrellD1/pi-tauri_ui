@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    (() => {
+      let saved;
+      try { saved = localStorage.getItem('html-theme'); } catch {}
+      const preference = saved === 'light' || saved === 'dark' ? saved : 'system';
+      document.documentElement.dataset.themePreference = preference;
+      document.documentElement.dataset.theme = preference === 'system'
+        ? matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' : preference;
+    })();
+  </script>
+  <title>PR #1 review checklist — groups, run states, picker</title>
+  <meta name="description" content="Human verification checklist for pi-tauri_ui PR #1: run states, custom groups, context badges, universal project picker, recent, queue survival, skills popup.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23222222'/%3E%3Cpath d='M12 10l-6 6 6 6m8-12l6 6-6 6' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --page: #ffffff; --ink: #242424; --muted: #686868; --quiet: #767676;
+      --line: #e4e4e4; --surface: #f7f7f7; --surface-deep: #ededed; --strong: #2c2c2c;
+      color-scheme: light;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    :root[data-theme="dark"] {
+      --page: #171717; --ink: #e6e6e6; --muted: #adadad; --quiet: #999999;
+      --line: #353535; --surface: #202020; --surface-deep: #2c2c2c; --strong: #d9d9d9;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font-family: var(--font); font-size: 17px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
+    .page { width: min(1080px, calc(100% - 96px)); margin: 0 auto; }
+    .masthead { padding: 29px 0 24px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .wordmark { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+    .masthead-actions { display: flex; align-items: center; gap: 24px; }
+    .edition { color: var(--muted); font-size: 13px; }
+    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+    .theme-toggle:hover { color: var(--ink); background: var(--surface); }
+    .theme-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .theme-toggle .sun { display: none; }
+    [data-theme="dark"] .theme-toggle .sun { display: block; }
+    [data-theme="dark"] .theme-toggle .moon { display: none; }
+    .hero { padding: 58px 0 38px; }
+    .eyebrow { font-size: 12px; font-family: var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin: 0 0 16px; }
+    h1 { font-size: clamp(32px, 4.5vw, 48px); line-height: 1.13; font-weight: 600; letter-spacing: -.045em; max-width: 800px; margin: 0; }
+    .lede { max-width: 720px; font-size: 20px; line-height: 1.6; color: var(--muted); margin-top: 22px; }
+    .progress { margin-top: 26px; max-width: 690px; }
+    .progress-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; color: var(--muted); margin-bottom: 8px; }
+    .progress-row strong { color: var(--ink); }
+    .bar { height: 8px; border-radius: 4px; background: var(--surface-deep); overflow: hidden; }
+    .bar > div { height: 100%; width: 0; background: var(--strong); border-radius: 4px; transition: width .2s; }
+    .reset { margin-top: 12px; font-size: 13px; color: var(--quiet); background: none; border: none; cursor: pointer; padding: 0; font-family: var(--font); }
+    .reset:hover { color: var(--ink); text-decoration: underline; }
+    ticket { display: block; padding-top: 68px; }
+    .ticket-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 6px; }
+    .ticket-num { font-family: var(--mono); font-size: 12px; color: var(--quiet); }
+    .ticket-head h2 { font-size: 27px; font-weight: 600; letter-spacing: -.03em; margin: 0; flex: 1; }
+    .ticket-count { font-family: var(--mono); font-size: 12px; color: var(--quiet); white-space: nowrap; }
+    .prework { max-width: 690px; color: var(--muted); font-size: 15px; margin: 8px 0 4px; }
+    .prework code { font-family: var(--mono); font-size: .85em; background: var(--surface-deep); padding: 2px 6px; border-radius: 4px; }
+    checklist-item { display: flex; gap: 14px; align-items: flex-start; padding: 13px 4px; border-bottom: 1px solid var(--line); cursor: pointer; max-width: 760px; }
+    checklist-item:first-of-type { border-top: 1px solid var(--line); margin-top: 14px; }
+    checklist-item:hover { background: var(--surface); }
+    checklist-item input { margin-top: 7px; width: 16px; height: 16px; accent-color: var(--strong); flex-shrink: 0; cursor: pointer; }
+    checklist-item .text { flex: 1; font-size: 15.5px; line-height: 1.6; }
+    checklist-item.done .text { color: var(--quiet); text-decoration: line-through; text-decoration-thickness: 1px; }
+    checklist-item code { font-family: var(--mono); font-size: .82em; background: var(--surface-deep); padding: 2px 6px; border-radius: 4px; }
+    footer { border-top: 1px solid var(--line); margin-top: 68px; padding: 23px 0 32px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) { .page { width: calc(100% - 40px); } body { font-size: 16px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <div class="wordmark">pi-tauri_ui · PR #1</div>
+      <div class="masthead-actions">
+        <div class="edition">Review checklist</div>
+        <button class="theme-toggle" type="button" aria-label="Toggle light and dark theme" title="Toggle light and dark theme">
+          <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
+          <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="hero">
+      <p class="eyebrow">Branch feat/groups-and-run-states</p>
+      <h1>Groups, run states &amp; project picker</h1>
+      <p class="lede">Human pass over what automation can't judge: hover timing, placement, wording, and cross-restart persistence. Work top to bottom; each box is one verifiable behavior.</p>
+      <div class="progress">
+        <div class="progress-row"><span>Overall</span><strong id="total-count">0 / 0</strong></div>
+        <div class="bar"><div id="total-bar"></div></div>
+        <button class="reset" id="reset" type="button">Reset all checkboxes</button>
+      </div>
+    </div>
+    <main>
+
+      <ticket data-name="run-states">
+        <div class="ticket-head"><span class="ticket-num">01</span><h2>Run states</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: launch the dev app, open a project with at least two chats, start a slow turn (e.g. ask pi to explain the project).</p>
+        <checklist-item>While the turn runs, switch to another chat: the first row shows a grayscale spinner, not a blue dot.</checklist-item>
+        <checklist-item>When the background turn settles, a blue dot appears on its row plus a “Finished in …” toast.</checklist-item>
+        <checklist-item>Opening the dotted chat clears the dot (and the toast action jumps to it).</checklist-item>
+        <checklist-item>Quit and reopen the app: finished-unseen dots are back; chats that were mid-run show no dot (their runs died with the quit).</checklist-item>
+        <checklist-item>With <code>prefers-reduced-motion</code> on, the spinner is static (no rotation).</checklist-item>
+      </ticket>
+
+      <ticket data-name="groups">
+        <div class="ticket-head"><span class="ticket-num">02</span><h2>Custom groups</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: have 2+ chats in one project. The Groups parent sits above Projects.</p>
+        <checklist-item>Right-click a chat → hovering “Add to group ›” flies a submenu out to the right (no click needed); moving the mouse diagonally into it doesn't dismiss it.</checklist-item>
+        <checklist-item>The submenu lists existing groups with ✓ on memberships; clicking toggles membership and the row appears/disappears in the group.</checklist-item>
+        <checklist-item>“＋ New group” opens a naming modal; creating adds the chat and the new group accordion appears under Groups.</checklist-item>
+        <checklist-item>Right-clicking a chat inside its group offers “Remove from …”; the hover × on a group header deletes the group but leaves the chats in their projects.</checklist-item>
+        <checklist-item>The group header <code>+</code> starts a chat in that group's project, auto-adds it to the group, and shows a “project · group” notice.</checklist-item>
+        <checklist-item>Collapse Groups and Projects, quit, reopen: both stay as you left them.</checklist-item>
+      </ticket>
+
+      <ticket data-name="badges">
+        <div class="ticket-head"><span class="ticket-num">03</span><h2>Context badges above the composer</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: open any chat (new or existing) and look just above the “Message pi…” input.</p>
+        <checklist-item><code>project · name</code> and <code>group · name</code> pills sit left-aligned directly above the input on every chat, not just new ones.</checklist-item>
+        <checklist-item>A chat in no group shows <code>group · + Add</code>; clicking it opens the membership menu (toggle ✓s plus “＋ New group”).</checklist-item>
+        <checklist-item>Clicking the project pill opens the picker; picking a folder starts a fresh chat there and registers the folder as a project.</checklist-item>
+        <checklist-item>The pills never overlap the queue bar, skill popup, or attach strip when those appear — transients stack above, pills hug the input.</checklist-item>
+      </ticket>
+
+      <ticket data-name="picker">
+        <div class="ticket-head"><span class="ticket-num">04</span><h2>Universal project picker</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: open the picker via a project pill or the <code>+</code> on the Projects header.</p>
+        <checklist-item>Clicking a folder descends into it; breadcrumbs jump back up to any level including <code>/</code>; going back is instant (cached, no spinner).</checklist-item>
+        <checklist-item>Typing filters the current level within ~150ms; typing a path starting with <code>/</code> or <code>~</code> plus Enter jumps straight there.</checklist-item>
+        <checklist-item>“Browse in Finder…” opens the native picker and the modal jumps to the chosen folder without closing.</checklist-item>
+        <checklist-item>An unreadable folder shows an inline error and keeps the previous listing; <code>Esc</code> or Cancel closes without side effects.</checklist-item>
+        <checklist-item>The primary button reads “Start chat here” from a badge and “Add project” from the Projects header, and does exactly that.</checklist-item>
+      </ticket>
+
+      <ticket data-name="recent">
+        <div class="ticket-head"><span class="ticket-num">05</span><h2>Recent</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: have chats across at least two projects with different ages.</p>
+        <checklist-item>Recent is the topmost parent, collapsed on first sight; opening it shows the 5 newest chats regardless of project or group, newest first.</checklist-item>
+        <checklist-item>With 6+ chats, “Show N more” expands to 15 and “Show less” collapses back; reopening the app resets to 5.</checklist-item>
+        <checklist-item>Recent rows behave identically to project rows: timestamps, run spinner, unseen dot, click-to-open, right-click menu.</checklist-item>
+        <checklist-item>Sidebar search filters Recent like the other parents.</checklist-item>
+      </ticket>
+
+      <ticket data-name="queue">
+        <div class="ticket-head"><span class="ticket-num">06</span><h2>Queued messages survive chat switches</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: start a slow turn in chat A, queue a follow-up (“Queue” button), then switch to chat B.</p>
+        <checklist-item>Chat B shows no queue bar; switching back to A restores the exact queued text.</checklist-item>
+        <checklist-item>If the run consumed the queue while you were away, returning to A shows “N queued messages were delivered while you were away” and the bar is truthfully empty.</checklist-item>
+        <checklist-item>Quitting the app with a queued message loses it (processes die with the app) — acceptable, but confirm no stale bar claims otherwise on relaunch.</checklist-item>
+      </ticket>
+
+      <ticket data-name="skills">
+        <div class="ticket-head"><span class="ticket-num">07</span><h2>Skills popup</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: focus the composer in any chat.</p>
+        <checklist-item>Typing a bare <code>/</code> or <code>$</code> shows nothing; typing one more letter reveals matching skills.</checklist-item>
+        <checklist-item>No empty bordered box ever sits above the composer while typing normal text.</checklist-item>
+        <checklist-item><code>↑↓</code> / <code>Enter</code> / <code>Tab</code> / <code>Esc</code> / click all accept or dismiss as expected, inserting canonical <code>/skill:name</code> text.</checklist-item>
+      </ticket>
+
+    </main>
+    <footer><span>pi-tauri_ui · PR #1 human checklist</span><span>Progress saves in this browser only.</span></footer>
+  </div>
+  <script>
+    const themeButton = document.querySelector('.theme-toggle');
+    const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+    function setTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      const label = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      themeButton.setAttribute('aria-label', label);
+      themeButton.title = label;
+    }
+    themeButton.addEventListener('click', () => {
+      const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.themePreference = theme;
+      setTheme(theme);
+      try { localStorage.setItem('html-theme', theme); } catch {}
+    });
+    systemTheme.addEventListener('change', e => {
+      if (document.documentElement.dataset.themePreference === 'system') setTheme(e.matches ? 'dark' : 'light');
+    });
+    setTheme(document.documentElement.dataset.theme);
+
+    const KEY = 'pr1-checklist';
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
+    const tickets = [...document.querySelectorAll('ticket')];
+    const items = [];
+    tickets.forEach((t, ti) => {
+      [...t.querySelectorAll('checklist-item')].forEach((el, ii) => {
+        const id = t.dataset.name + ':' + ii;
+        const label = document.createElement('label');
+        label.style.cssText = 'display:flex;gap:14px;align-items:flex-start;width:100%;cursor:pointer;';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = !!saved[id];
+        box.setAttribute('aria-label', 'Mark verified: ' + el.textContent.trim().slice(0, 80));
+        const span = document.createElement('span');
+        span.className = 'text';
+        span.innerHTML = el.innerHTML;
+        label.append(box, span);
+        el.textContent = '';
+        el.appendChild(label);
+        if (box.checked) el.classList.add('done');
+        box.addEventListener('change', () => {
+          el.classList.toggle('done', box.checked);
+          saved[id] = box.checked;
+          try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch {}
+          update();
+        });
+        items.push({ id, el });
+      });
+    });
+    function update() {
+      let done = 0;
+      tickets.forEach(t => {
+        const boxes = [...t.querySelectorAll('input[type=checkbox]')];
+        const n = boxes.filter(b => b.checked).length;
+        done += n;
+        t.querySelector('[data-count]').textContent = n + ' / ' + boxes.length;
+      });
+      document.getElementById('total-count').textContent = done + ' / ' + items.length;
+      document.getElementById('total-bar').style.width = (items.length ? (done / items.length * 100) : 0) + '%';
+    }
+    document.getElementById('reset').addEventListener('click', () => {
+      saved = {};
+      try { localStorage.removeItem(KEY); } catch {}
+      document.querySelectorAll('checklist-item input').forEach(b => { b.checked = false; b.closest('checklist-item').classList.remove('done'); });
+      update();
+    });
+    update();
+  </script>
+</body>
+</html>
