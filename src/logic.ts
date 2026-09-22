@@ -4,14 +4,15 @@ export function esc(s: string): string {
 }
 export function inlineMd(src: string): string {
   // Tokens are recognized before escaping. Generated HTML is never re-parsed.
-  const token = /`([^`\n]+)`|\[([^\]\n]+)\]\((https?:[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g;
+  const token = /!\[([^\]\n]*)\]\(([^\s)]+)(?:\s+"[^"\n]*")?\)|`([^`\n]+)`|\[([^\]\n]+)\]\((https?:[^\s)]+)\)|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g;
   let out = "", offset = 0;
   for (const m of src.matchAll(token)) {
     out += esc(src.slice(offset, m.index));
-    if (m[1]) out += `<code>${esc(m[1])}</code>`;
-    else if (m[2]) out += `<a href="${esc(m[3])}" target="_blank" rel="noopener noreferrer">${esc(m[2])}</a>`;
-    else if (m[4]) out += `<strong>${esc(m[4])}</strong>`;
-    else out += `<em>${esc(m[5])}</em>`;
+    if (m[2] !== undefined) out += `<img class="md-img" data-path="${esc(m[2])}" alt="${esc(m[1] || "image")}">`;
+    else if (m[3]) out += `<code>${esc(m[3])}</code>`;
+    else if (m[4]) out += `<a href="${esc(m[5])}" target="_blank" rel="noopener noreferrer">${esc(m[4])}</a>`;
+    else if (m[6]) out += `<strong>${esc(m[6])}</strong>`;
+    else out += `<em>${esc(m[7])}</em>`;
     offset = m.index! + m[0].length;
   }
   return out + esc(src.slice(offset));

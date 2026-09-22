@@ -769,6 +769,81 @@ fn resolve_slug(slug: &str) -> Option<String> {
 /// its folder (`cwd: null` when the folder is gone) with its chats inside.
 /// The sidebar renders this directly — no manual registration needed.
 #[tauri::command]
+fn pi_list_dirs(path: String) -> Result<Value, String> {
+    // Universal folder picker backend: child directories of any path.
+    // Synchronous std::fs read — one directory level, capped, no recursion.
+    let canon = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot open {}: {}", path, e))?;
+    if (!canon.is_dir()) {
+        return Err(format!("Not a folder: {}", path));
+    }
+    let entries = std::fs::read_dir(&canon).map_err(|e| format!("Cannot list {}: {}", path, e))?;
+    let mut dirs: Vec<String> = Vec::new();
+    let mut truncated = false;
+    for entry in entries.flatten() {
+        if (dirs.len() >= 1000) {
+            truncated = true;
+            break;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if (name.starts_with('.')) {
+            continue;
+        }
+        if (entry.file_type().map(|t| t.is_dir()).unwrap_or(false)) {
+            dirs.push(entry.path().to_string_lossy().into_owned());
+        }
+    }
+    dirs.sort_by_key(|s| s.to_lowercase());
+    Ok(serde_json::json!({
+        "path": canon.to_string_lossy(),
+        "parent": canon.parent().map(|p| p.to_string_lossy().into_owned()),
+        "home": dirs::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| "/".to_string()),
+        "dirs": dirs,
+        "truncated": truncated,
+    }))
+}
+
+#[tauri::command]
+fn pi_read_image(path: String) -> Result<Value, String> {
+    // Render markdown-referenced images: allowlisted raster/vector types only,
+    // resolved path must exist, 10MB cap. Returned as base64 (no asset-protocol
+    // scope or extra capabilities needed).
+    use base64::Engine as _;
+    let canon = PathBuf::from(&path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot open {}: {}", path, e))?;
+    if (!canon.is_file()) {
+        return Err(format!("Not a file: {}", path));
+    }
+    let mime = match canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        _ => return Err(format!("Not a supported image: {}", path)),
+    };
+    const MAX: u64 = 10 * 1024 * 1024;
+    let bytes = std::fs::read(&canon).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+    if (bytes.len() as u64 > MAX) {
+        return Err("Image is larger than 10MB".to_string());
+    }
+    Ok(serde_json::json!({
+        "path": canon.to_string_lossy(),
+        "mime": mime,
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+#[tauri::command]
 async fn pi_all_projects() -> Result<Value, String> {
     let base = dirs::home_dir().map(|h| h.join(".pi").join("agent").join("sessions"));
     let projects = tokio::task::spawn_blocking(move || {
@@ -872,6 +947,44 @@ mod tests {
         assert!(!matches_scope(None, "/b", "/a", None));
     }
     #[test]
+    fn list_dirs_lists_only_visible_subdirs() {
+        let base = std::env::temp_dir().join("pi-ui-picker-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("b-sub")).unwrap();
+        std::fs::create_dir_all(base.join(".hidden")).unwrap();
+        std::fs::create_dir_all(base.join("a-sub")).unwrap();
+        std::fs::write(base.join("file.txt"), "x").unwrap();
+        let out = pi_list_dirs(base.to_string_lossy().into_owned()).unwrap();
+        let dirs = out.pointer("/dirs").unwrap().as_array().unwrap();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].as_str().unwrap().ends_with("a-sub"));
+        assert!(dirs[1].as_str().unwrap().ends_with("b-sub"));
+        assert!(out.pointer("/parent").unwrap().as_str().is_some());
+        assert_eq!(out.pointer("/truncated").unwrap().as_bool(), Some(false));
+        assert!(pi_list_dirs(base.join("nope").to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    #[test]
+    fn read_image_round_trips_png_and_rejects_non_images() {
+        let base = std::env::temp_dir().join("pi-ui-img-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Minimal 1x1 PNG (signature + IHDR + IDAT + IEND).
+        let png: Vec<u8> = vec![
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 1, 99, 96, 0, 1,
+            0, 0, 5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        std::fs::write(base.join("a.png"), &png).unwrap();
+        std::fs::write(base.join("b.txt"), "nope").unwrap();
+        let out = pi_read_image(base.join("a.png").to_string_lossy().into_owned()).unwrap();
+        assert_eq!(out.pointer("/mime").unwrap().as_str(), Some("image/png"));
+        assert!(!out.pointer("/data").unwrap().as_str().unwrap().is_empty());
+        assert!(pi_read_image(base.join("b.txt").to_string_lossy().into_owned()).is_err());
+        assert!(pi_read_image(base.join("missing.png").to_string_lossy().into_owned()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+    #[test]
     fn rejection_is_an_error() {
         assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
@@ -922,7 +1035,9 @@ fn main() {
             pi_set_name,
             pi_ui_response,
             pi_list_sessions,
-            pi_all_projects
+            pi_all_projects,
+            pi_list_dirs,
+            pi_read_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

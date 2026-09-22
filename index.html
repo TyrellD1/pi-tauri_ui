@@ -43,7 +43,6 @@
           <input id="search" placeholder="Search chats" autocomplete="off" spellcheck="false" aria-label="Search chats" />
           <kbd class="search-hint" aria-hidden="true">⌘K</kbd>
         </div>
-        <div class="projects-head"><span>Projects</span><button id="btn-add-project" class="mini-add" type="button" title="Add project folder">+</button></div>
         <div id="chat-list" class="chat-list" role="list" aria-label="Projects and conversations"></div>
         <div class="side-foot">
           <div id="conn-error" class="conn-error hidden" role="alert"></div>
@@ -79,6 +78,7 @@
           <div id="dialog-slot"></div>
           <div id="attach-strip" class="attach-strip hidden"></div>
           <div id="attach-error" class="attach-error hidden" role="alert"></div>
+          <div id="chat-context"></div>
           <div class="composer">
             <textarea id="input" rows="1" placeholder="Message pi…" aria-label="Message pi"></textarea>
             <button id="btn-queue" class="composer-btn secondary hidden" type="button" title="Send after this turn (follow-up)" aria-label="Queue as follow-up, sent after this turn">
