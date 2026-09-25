@@ -348,6 +348,8 @@ menuBtn.onclick = (e) => {
   if (menuRoot.innerHTML) closeMenu();
   else openHeaderMenu();
 };
+chatTitle.title = "Double-click to rename";
+chatTitle.ondblclick = () => { if (!booting && !bootError) openRename(); };
 
 // ---------- modals (accessible dialog, focus trap + restore) ----------
 let modalPrevFocus: HTMLElement | null = null;
@@ -444,14 +446,18 @@ function openSettings() {
   });
 }
 
-function openRename() {
+function rowName(project: string, path: string): string {
+  const s = (projectChats.get(project) ?? []).find((x) => x.path === path);
+  return s?.name ?? s?.preview.slice(0, 48) ?? "";
+}
+function openRename(target?: { cwd: string; session: string | null; current: string }) {
   openModal("Rename chat", (box, close) => {
     const lab = document.createElement("label");
     lab.textContent = "Name";
     lab.setAttribute("for", "m-name");
     const inp = document.createElement("input");
     inp.id = "m-name";
-    inp.value = chatTitle.textContent === "New chat" ? "" : chatTitle.textContent ?? "";
+    inp.value = target?.current ?? (chatTitle.textContent === "New chat" ? "" : chatTitle.textContent ?? "");
     inp.placeholder = "e.g. refactor-auth";
     const row = document.createElement("div");
     row.className = "dialog-actions";
@@ -468,11 +474,23 @@ function openRename() {
       close();
       if (!name) return;
       try {
-        await invokeScoped("pi_set_name", { name });
-        await refreshState();
-        await refreshSessions();
+        if (target && (target.session !== activePath || target.cwd !== cwd)) {
+          // Row rename: direct scoped call, never via targetScope (R2-F1's
+          // sibling — the global override would retarget every command).
+          if (target.session && runningSet.has(`${target.cwd}:${target.session}`)) {
+            notify({ text: "Wait for the turn to finish before renaming." });
+            return;
+          }
+          await invokeChecked("pi_set_name", { cwd: target.cwd, session: target.session, name });
+          await refreshSessions();
+          await refreshAllProjects();
+        } else {
+          await invokeScoped("pi_set_name", { name });
+          await refreshState();
+          await refreshSessions();
+        }
       } catch (e) {
-        notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: openRename });
+        notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openRename(target) });
       }
     };
     row.appendChild(c);
@@ -1505,6 +1523,10 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     return subBtns;
   };
   if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
+  addItem("Rename chat", () => {
+    const pcwd = target.project ?? findProjectForPath(target.path) ?? cwd;
+    openRename({ cwd: pcwd, session: target.path, current: rowName(pcwd, target.path) });
+  });
   if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
   const trigger = addItem("Add to group ›", () => {
     if (sub) hideSub();
@@ -2092,6 +2114,9 @@ function updateSendState() {
 // events must never render into the visible chat). runningSet drives the
 // unseen-finished blue dots in the sidebar (running rows use the spinner).
 const runningSet = new Set<string>();
+// Adopted session file not yet visible in the sidebar list (idea 5). One-shot
+// backup refresh on settle, then cleared either way — never a standing flag.
+let adoptedUnlisted: string | null = null;
 // Chats whose background run finished while you weren't looking. Blue dot
 // until opened. Persisted so it survives app restarts.
 let unseenFinished = new Set<string>();
@@ -2136,7 +2161,28 @@ async function refreshState() {
 function deriveTitle(): string {
   const firstUser = messages.find((m) => m.role === "user");
   if (!firstUser) return "";
-  return msgText(firstUser).slice(0, 48);
+  return msgText(firstUser).replace(/\s+/g, " ").trim().slice(0, 48);
+}
+// Auto-rename once per session from the first user message (idea 3).
+// Local heuristic only — no model round-trip, zero cost/latency.
+const autoNamed = new Set<string>();
+async function maybeAutoRename() {
+  if (!activePath || activeName || autoNamed.has(activePath) || booting || bootError) return;
+  const name = deriveTitle();
+  if (!name) return;
+  autoNamed.add(activePath);
+  while (autoNamed.size > 200) {
+    const first = autoNamed.values().next().value as string | undefined;
+    if (first === undefined || first === activePath) break;
+    autoNamed.delete(first);
+  }
+  try {
+    await invokeScoped("pi_set_name", { name });
+    await refreshState();
+    await refreshSessions();
+  } catch {
+    autoNamed.delete(activePath ?? "");
+  }
 }
 
 function reconcileSend() {
@@ -2163,6 +2209,7 @@ async function refreshSessions() {
     const res = await invokeScoped<{sessions: SessionInfo[]}>("pi_list_sessions");
     if (gen !== bootGen) return;
     sessionsErrShown = false; sessions = res.sessions ?? [];
+    if (adoptedUnlisted && sessions.some((s) => `${cwd}:${s.path}` === adoptedUnlisted)) adoptedUnlisted = null;
     projectChats.set(cwd, sessions);
     renderProjects();
   } catch (e) {
@@ -2298,7 +2345,7 @@ function checkWatchdog() {
   disarmWatchdog();
 }
 async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
-  const owner = sessKey(), gen = bootGen, id = newClientId(), startIndex = messages.length;
+  let owner = sessKey(); const gen = bootGen, id = newClientId(), startIndex = messages.length;
   sendInFlight = id; armWatchdog();
   if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; setBusy(true); renderSettled(); }
   updateSendState();
@@ -2312,6 +2359,19 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
       try { st = await invokeScoped<Record<string, unknown>>("pi_get_state"); }
       catch { return; } // Acceptance already succeeded; never offer a duplicate send.
       if (gen !== bootGen) return;
+      // First message on a chat with no session file yet: adopt the file pi
+      // just created so the row selects, events tag, and the sidebar lists
+      // it right away (idea 5). Ownership moves with the key (R2-F1).
+      const sf = typeof st.sessionFile === "string" ? st.sessionFile : null;
+      if (sf && !activePath) {
+        activePath = sf; owner = sessKey();
+        if (typeof st.sessionName === "string") activeName = st.sessionName;
+        if (pendingSend) pendingSend.owner = owner;
+        await refreshSessions();
+        adoptedUnlisted = sessions.some((s) => s.path === sf) ? null : `${cwd}:${sf}`;
+        chatTitle.textContent = activeName || deriveTitle() || "New chat";
+        renderProjects();
+      }
       if (!st.isStreaming && pendingSend?.id === id) { pendingSend = null; setBusy(false); await refreshMessages(); }
     }
   } catch (e) {
@@ -2715,8 +2775,11 @@ async function handleEvent(p: PiEvent) {
   }
   if (t === "extension_ui_request") { showExtensionDialog(p); return; }
   // Route by owning chat: untagged events (preview fixtures) belong here.
+  // While the visible chat has no session file yet, same-cwd tagged events
+  // are also this view's (pre-adopt window, idea 5 / R2-F1).
   const key = eventRowKey(p);
-  const isVis = key === null || key === visibleKey();
+  const preAdopt = activePath === null && cwd !== "" && key !== null && key.startsWith(`${cwd}:`);
+  const isVis = key === null || key === visibleKey() || preAdopt;
   if (isVis && (t === "agent_start" || t === "agent_settled" || t.startsWith("message_") || t.startsWith("tool_execution_"))) pokeProgress();
   if (t === "queue_update") {
     const lists = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] };
@@ -2758,6 +2821,12 @@ async function handleEvent(p: PiEvent) {
     setBusy(false); pendingSend = null; renderSettled();
     // Keep live content visible while authoritative history is fetched.
     await refreshMessages(); await refreshAllProjects(); await refreshStats();
+    // One-shot backup: the first chat's row may still be unlisted (idea 5).
+    if (adoptedUnlisted && activePath && adoptedUnlisted === `${cwd}:${activePath}`) {
+      adoptedUnlisted = null;
+      await refreshSessions();
+    }
+    void maybeAutoRename();
     try { await refreshState(); } catch (e) { notify({text: `Couldn't refresh session: ${String(e)}`, kind: "error"}); }
   }
   if (t === "response" && p.success === false) notify({ text: `pi error: ${String(p.error ?? "Request failed")}`, kind: "error", sticky: true });
