@@ -3,3 +3,6 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 .DS_Store
+
+# local presentation decks
+pi-state-of-ui.html
