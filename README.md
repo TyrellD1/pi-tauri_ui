@@ -68,4 +68,6 @@ npm run dev -- --port 1422 --host 127.0.0.1
 
 Open `http://127.0.0.1:1422/?dev=1`. Expand **Preview scenarios** for populated, empty, streaming, permission, and rejected-send states. **Run UI regression** exercises the real composer, event handler, history renderer, drafts, permission responses, and navigation. Add `&listenerFailure=1` to verify startup retry. These controls and mock messages are excluded from production builds; no model calls occur in preview mode.
 
-The small Markdown renderer supports headings, fenced code, lists, quotes, links, and tables. It deliberately escapes raw HTML. Tool output starts at 200 lines with full output and copying on demand. No new runtime dependencies or polling were added.
+The small Markdown renderer supports headings, fenced code, lists, quotes, links, and tables. It deliberately escapes raw HTML. Tool output starts at 200 lines with full output and copying on demand. No new runtime dependencies or polling were added. `.md` / `.html` paths in chat render as clickable buttons (inline code included, fenced code and real links excluded).
+
+**Run UI regression with a clean profile.** The suite reads real persisted state (drafts, groups, expanded projects, unseen dots), so repeated runs in one browser profile drift and report false failures. Click **Reset preview state** in the dev panel first (or clear site data) for a deterministic run; a clean profile passes all 46 checks.

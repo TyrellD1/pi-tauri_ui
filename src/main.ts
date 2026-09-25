@@ -66,7 +66,9 @@ let unlinked: { slug: string; sessions: SessionInfo[] }[] = [];
 let expandedProjects = new Set<string>();
 try {
   const raw = prefGet("pi-expanded");
-  if (raw) expandedProjects = new Set(JSON.parse(raw) as string[]);
+  // Drop empty/junk entries: a stale "" here leaves the active project
+  // collapsed, which reads as "my chats disappeared".
+  if (raw) expandedProjects = new Set((JSON.parse(raw) as unknown[]).filter((p): p is string => typeof p === "string" && !!p.trim()));
 } catch {
   /* ignore */
 }
@@ -1906,7 +1908,10 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
   }
 }
 // Clickable chat paths (idea 2): .md/.html tokens become buttons that open
-// via the allowlisted backend command. Never inside links/code/pre/buttons.
+// via the allowlisted backend command. Fenced code and real links are left
+// alone; inline `code` is included because that is how pi usually prints a
+// path. NOTE: this runs on a detached tree (the block is appended after), so
+// never test isConnected here — only whether the node still has a parent.
 const PATH_TOKEN = /(^|[\s("'\[>])([\w.~\-/]+\.(md|html))\b/gi;
 function linkifyPaths(root: ParentNode) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -1914,12 +1919,14 @@ function linkifyPaths(root: ParentNode) {
   while (walker.nextNode()) {
     const n = walker.currentNode as Text;
     const p = n.parentElement;
-    if (!p || p.closest("a,code,pre,button")) continue;
+    if (!p || p.closest("pre,a,button")) continue;
     PATH_TOKEN.lastIndex = 0;
     if (PATH_TOKEN.test(n.data)) targets.push(n);
   }
   for (const n of targets) {
-    if (!n.isConnected) continue;
+    if (!n.parentNode) continue;
+    const parent = n.parentElement;
+    const inCode = parent?.tagName === "CODE";
     const frag = document.createDocumentFragment();
     let last = 0;
     PATH_TOKEN.lastIndex = 0;
@@ -1930,7 +1937,7 @@ function linkifyPaths(root: ParentNode) {
       frag.append(n.data.slice(last, idx) + (m[1] ?? ""));
       const b = document.createElement("button");
       b.type = "button";
-      b.className = "path-link";
+      b.className = "path-link" + (inCode ? " in-code" : "");
       b.textContent = raw;
       b.dataset.openPath = raw;
       b.title = `Open ${raw}`;
@@ -2328,7 +2335,14 @@ function clearRunScope(preserveDialogs = false) {
   extStatus = ""; streamActivity = "thinking"; streamActivityTool = ""; resetView();
 }
 function applyState(st: Record<string, unknown>) {
-  cwd = String(st.cwd ?? cwd); activePath = typeof st.sessionFile === "string" ? st.sessionFile : null;
+  // Never adopt an empty cwd/session: the first state read at boot carries the
+  // still-unknown "" cwd, and accepting it empties the project list (chats
+  // vanish from the sidebar). The real backend resolves this itself, so a
+  // preview/older backend must not be able to.
+  const stCwd = typeof st.cwd === "string" ? st.cwd.trim() : "";
+  if (stCwd) cwd = stCwd;
+  const stFile = typeof st.sessionFile === "string" ? st.sessionFile.trim() : "";
+  activePath = stFile || null;
   cwdLabel.textContent = cwd.split("/").filter(Boolean).pop() ?? cwd; cwdBtn.title = cwd;
   activeName = String(st.sessionName ?? "");
   chatTitle.textContent = activeName || deriveTitle() || "New chat";
