@@ -34,6 +34,8 @@ const sendBtn = $("btn-send") as HTMLButtonElement;
 const stopBtn = $("btn-stop") as HTMLButtonElement;
 const queueBtn = $("btn-queue") as HTMLButtonElement;
 const statusLine = $("status-line");
+const runSpin = $("run-spin");
+const branchLine = $("branch-line");
 const tokenLine = $("token-line");
 const ctxWarn = $("ctx-warn");
 const chatTitle = $("chat-title");
@@ -2110,6 +2112,31 @@ async function invokeScoped<T>(cmd: string, params: Record<string, unknown> = {}
   return invokeChecked<T>(cmd, { ...params, ...visibleScope() });
 }
 
+// Git branch for the status cluster (idea 6). Cached per cwd, refreshed on
+// every chat open; null = not a repo, shown as nothing. Needs no pi process.
+const branchCache = new Map<string, string | null>();
+function renderBranch() {
+  const b = branchCache.get(cwd) ?? null;
+  if (b) {
+    branchLine.textContent = `\u2387 ${b}`;
+    branchLine.title = `Git branch: ${b}`;
+    branchLine.classList.remove("hidden");
+  } else {
+    branchLine.textContent = "";
+    branchLine.title = "";
+    branchLine.classList.add("hidden");
+  }
+}
+async function refreshBranch() {
+  if (!cwd) return;
+  try {
+    const r = await invokeChecked<{ branch: string | null }>("pi_git_branch", { cwd });
+    branchCache.set(cwd, r.branch);
+  } catch {
+    branchCache.set(cwd, null);
+  }
+  renderBranch();
+}
 function renderStatus() {
   let label: string;
   if (booting) label = "Connecting…";
@@ -2123,7 +2150,8 @@ function renderStatus() {
   } else if (extStatus) label = extStatus;
   else label = activityLabel("idle");
   statusLine.textContent = label;
-}
+  runSpin.classList.toggle("hidden", !streaming);
+  runSpin.setAttribute("aria-label", streaming ? label : "Idle");
 
 function hasDraft(): boolean {
   return inputEl.value.trim().length > 0 || pendingImages.length > 0;
@@ -2195,6 +2223,7 @@ function applyState(st: Record<string, unknown>) {
   cwdLabel.textContent = cwd.split("/").filter(Boolean).pop() ?? cwd; cwdBtn.title = cwd;
   activeName = String(st.sessionName ?? "");
   chatTitle.textContent = activeName || deriveTitle() || "New chat";
+  renderBranch();
   const level = String(st.thinkingLevel ?? thinkingSelect.value);
   if ([...thinkingSelect.options].some(o => o.value === level)) thinkingSelect.value = level;
   setBusy(st.isStreaming === true); renderProjects();
@@ -2549,6 +2578,7 @@ async function openSession(project: string, path: string | null) {
     clearRunScope(true); restoreDraft(); updateSkillPop();
     restoreQueueBar();
     await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshCommands(); await refreshStats();
+    void refreshBranch();
     expandedProjects.add(project); saveExpanded();
     await refreshAllProjects();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
@@ -3292,6 +3322,7 @@ async function boot(_respawn = false): Promise<void> {
       restoreQueueBar();
       booting = false; restoreDraft(); updateSkillPop();
       await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshCommands(); await refreshStats();
+      void refreshBranch();
       if (gen !== bootGen) return;
       hideConnError(); renderSettled(); inputEl.focus();
     } catch (e) {
