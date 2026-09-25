@@ -764,12 +764,14 @@ async fn pi_coded_chat(cwd: String, name: String, first_message: Option<String>,
     // A chat made by code: fresh session, `[code]`-prefixed name, optional
     // first prompt. Group assignment stays frontend-side (localStorage).
     let inst = ensure(&app, &pool, &cwd, None, true).await?;
+    // Learn the fresh session file before naming it, mirroring pi_new_chat:
+    // naming needs the session to exist on disk.
+    learn_file(&pool, &inst).await;
     let full = format!("[code] {}", name.trim());
     inst_request(&pool, &inst, serde_json::json!({ "type": "set_session_name", "name": full })).await?;
-    learn_file(&pool, &inst).await;
     let path = inst.session_file.lock().await.clone().ok_or("couldn't create session")?;
     if let Some(m) = first_message {
-        if (!m.trim().is_empty()) {
+        if !m.trim().is_empty() {
             let mut cmd = serde_json::json!({ "type": "prompt", "message": m });
             attach_images(&mut cmd, None);
             fire_inst(&pool, &inst, cmd).await?;
@@ -854,23 +856,23 @@ fn pi_list_dirs(path: String) -> Result<Value, String> {
     let canon = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("Cannot open {}: {}", path, e))?;
-    if (!canon.is_dir()) {
+    if !canon.is_dir() {
         return Err(format!("Not a folder: {}", path));
     }
     let entries = std::fs::read_dir(&canon).map_err(|e| format!("Cannot list {}: {}", path, e))?;
     let mut dirs: Vec<String> = Vec::new();
     let mut truncated = false;
     for entry in entries.flatten() {
-        if (dirs.len() >= 1000) {
+        if dirs.len() >= 1000 {
             truncated = true;
             break;
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if (name.starts_with('.')) {
+        if name.starts_with('.') {
             continue;
         }
-        if (entry.file_type().map(|t| t.is_dir()).unwrap_or(false)) {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             dirs.push(entry.path().to_string_lossy().into_owned());
         }
     }
@@ -893,7 +895,7 @@ fn pi_read_image(path: String) -> Result<Value, String> {
     let canon = PathBuf::from(&path)
         .canonicalize()
         .map_err(|e| format!("Cannot open {}: {}", path, e))?;
-    if (!canon.is_file()) {
+    if !canon.is_file() {
         return Err(format!("Not a file: {}", path));
     }
     let mime = match canon
@@ -912,7 +914,7 @@ fn pi_read_image(path: String) -> Result<Value, String> {
     };
     const MAX: u64 = 10 * 1024 * 1024;
     let bytes = std::fs::read(&canon).map_err(|e| format!("Cannot read {}: {}", path, e))?;
-    if (bytes.len() as u64 > MAX) {
+    if bytes.len() as u64 > MAX {
         return Err("Image is larger than 10MB".to_string());
     }
     Ok(serde_json::json!({

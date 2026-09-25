@@ -39,7 +39,6 @@ const branchLine = $("branch-line");
 const tokenLine = $("token-line");
 const ctxWarn = $("ctx-warn");
 const chatTitle = $("chat-title");
-const chatSub = $("chat-sub");
 const cwdBtn = $("btn-cwd") as HTMLButtonElement;
 const cwdLabel = $("cwd-label");
 const searchEl = $("search") as HTMLInputElement;
@@ -625,19 +624,29 @@ function loadGroups(): ChatGroups {
 function saveGroups(g: ChatGroups) { prefSet("pi-chat-groups", JSON.stringify(g)); }
 // Chats made by code (idea 7). Names may not persist in session files (D1),
 // so the flag lives here next to groups and follows the same retention rule.
+// The set is cached in memory: isCoded runs per sidebar row, so parsing
+// localStorage on every row would cost 100 JSON.parse calls per render.
 const CODE_PREFIX = "[code]";
-function loadCoded(): string[] {
+let codedCache: Set<string> | null = null;
+function codedSet(): Set<string> {
+  if (codedCache) return codedCache;
   try {
     const raw = prefGet("pi-coded-chats");
     const arr = raw ? (JSON.parse(raw) as unknown) : [];
-    return Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : [];
-  } catch { return []; }
+    codedCache = new Set(
+      Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : []
+    );
+  } catch {
+    codedCache = new Set();
+  }
+  return codedCache;
 }
-function saveCoded(paths: string[]) { prefSet("pi-coded-chats", JSON.stringify(paths)); }
+function saveCoded(paths: string[]) {
+  codedCache = new Set(paths);
+  prefSet("pi-coded-chats", JSON.stringify(paths));
+}
 function isCoded(name: string | null, path: string): boolean {
-  if (name?.startsWith(CODE_PREFIX)) return true;
-  try { return (JSON.parse(prefGet("pi-coded-chats") ?? "[]") as string[]).includes(path); }
-  catch { return false; }
+  return !!name?.startsWith(CODE_PREFIX) || codedSet().has(path);
 }
 function groupClosed(): Set<string> {
   try {
@@ -747,8 +756,8 @@ async function refreshAllProjects() {
       if (kept.length !== arr.length) { g[n] = kept; gdirty = true; }
     }
     if (gdirty) saveGroups(g);
-    const coded = loadCoded().filter((p) => paths.has(p));
-    if (coded.length !== loadCoded().length) saveCoded(coded);
+    const coded = [...codedSet()].filter((p) => paths.has(p));
+    if (coded.length !== codedSet().size) saveCoded(coded);
     if (pruned) saveUnseen();
   }
   renderProjects();
@@ -1616,10 +1625,12 @@ async function newCodedChat(opts: { name: string; group?: string; firstMessage?:
   const name = opts.name.trim();
   if (!name) return null;
   if (navigating || booting || sendInFlight) { notify({ text: "One moment — try again when idle." }); return null; }
+  if (dialogs.size) { notify({ text: "Answer the pending request before creating a chat." }); return null; }
+  const first = opts.firstMessage?.trim();
   let path: string;
   try {
     const r = await invokeChecked<{ path: string }>("pi_coded_chat", {
-      cwd, name, first_message: opts.firstMessage?.trim() ? opts.firstMessage : null,
+      cwd, name, first_message: first ? first : null,
     });
     path = r.path;
   } catch (e) {
@@ -1632,7 +1643,7 @@ async function newCodedChat(opts: { name: string; group?: string; firstMessage?:
   await refreshAllProjects();
   const listed = [...projectChats.values()].some((list) => list.some((s) => s.path === path));
   if (!listed) { notify({ text: "Chat was made but isn't listed yet — reopen the project.", kind: "error" }); return null; }
-  if (!isCoded(`${CODE_PREFIX} ${name}`, path)) saveCoded([...loadCoded(), path]);
+  if (!isCoded(`${CODE_PREFIX} ${name}`, path)) saveCoded([...codedSet(), path]);
   const group = opts.group?.trim();
   if (group) {
     const g = loadGroups();
@@ -1912,7 +1923,9 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
 // alone; inline `code` is included because that is how pi usually prints a
 // path. NOTE: this runs on a detached tree (the block is appended after), so
 // never test isConnected here — only whether the node still has a parent.
-const PATH_TOKEN = /(^|[\s("'\[>])([\w.~\-/]+\.(md|html))\b/gi;
+// A fresh regex per pass: a shared /g/ instance carries lastIndex between
+// test() and matchAll(), which is easy to get wrong later.
+const pathTokenRe = () => /(^|[\s("'\[>])([\w.~\-/]+\.(md|html))\b/gi;
 function linkifyPaths(root: ParentNode) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   const targets: Text[] = [];
@@ -1920,17 +1933,14 @@ function linkifyPaths(root: ParentNode) {
     const n = walker.currentNode as Text;
     const p = n.parentElement;
     if (!p || p.closest("pre,a,button")) continue;
-    PATH_TOKEN.lastIndex = 0;
-    if (PATH_TOKEN.test(n.data)) targets.push(n);
+    if (pathTokenRe().test(n.data)) targets.push(n);
   }
   for (const n of targets) {
     if (!n.parentNode) continue;
-    const parent = n.parentElement;
-    const inCode = parent?.tagName === "CODE";
+    const inCode = n.parentElement?.tagName === "CODE";
     const frag = document.createDocumentFragment();
     let last = 0;
-    PATH_TOKEN.lastIndex = 0;
-    for (const m of n.data.matchAll(PATH_TOKEN)) {
+    for (const m of n.data.matchAll(pathTokenRe())) {
       const idx = m.index ?? 0;
       const raw = m[2] ?? "";
       if (!raw || raw.includes("://")) continue;
@@ -2228,7 +2238,17 @@ async function invokeScoped<T>(cmd: string, params: Record<string, unknown> = {}
 
 // Git branch for the status cluster (idea 6). Cached per cwd, refreshed on
 // every chat open; null = not a repo, shown as nothing. Needs no pi process.
+// Git branch for the status cluster (idea 6). Cached per cwd so the sync
+// renderer can show it; refetched on every chat open, null = not a repo.
 const branchCache = new Map<string, string | null>();
+function setBranch(dir: string, branch: string | null) {
+  branchCache.set(dir, branch);
+  while (branchCache.size > 50) {
+    const first = branchCache.keys().next().value as string | undefined;
+    if (first === undefined || first === dir) break;
+    branchCache.delete(first);
+  }
+}
 function renderBranch() {
   const b = branchCache.get(cwd) ?? null;
   if (b) {
@@ -2243,13 +2263,14 @@ function renderBranch() {
 }
 async function refreshBranch() {
   if (!cwd) return;
+  const dir = cwd;
   try {
-    const r = await invokeChecked<{ branch: string | null }>("pi_git_branch", { cwd });
-    branchCache.set(cwd, r.branch);
+    const r = await invokeChecked<{ branch: string | null }>("pi_git_branch", { cwd: dir });
+    setBranch(dir, r.branch);
   } catch {
-    branchCache.set(cwd, null);
+    setBranch(dir, null);
   }
-  renderBranch();
+  if (dir === cwd) renderBranch();
 }
 function renderStatus() {
   let label: string;
@@ -2328,6 +2349,8 @@ function saveUnseen() {
 function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
 function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
+  // A popover anchored to the chat scope must not outlive a chat switch.
+  closePopover();
   if (!preserveDialogs) { dialogs.clear(); dialogSlot.replaceChildren(); visibleDialogId = null; }
   queue = { steering: [], followUp: [] }; renderQueue();
   lastUsage = null; renderCtxCircle();
@@ -2518,12 +2541,18 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   build(box, closePopover);
   document.body.appendChild(box);
   const r = anchor.getBoundingClientRect();
-  box.style.width = `${Math.min(300, window.innerWidth - 16)}px`;
-  box.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
-  box.style.bottom = `${window.innerHeight - r.top + 6}px`;
-  if (box.getBoundingClientRect().left < 8) {
+  const gap = 6, pad = 8;
+  box.style.width = `${Math.min(300, window.innerWidth - pad * 2)}px`;
+  box.style.right = `${Math.max(pad, window.innerWidth - r.right)}px`;
+  box.style.bottom = `${window.innerHeight - r.top + gap}px`;
+  // Keep it on screen: nudge left, and flip below when there is no room above.
+  if (box.getBoundingClientRect().left < pad) {
     box.style.right = "auto";
-    box.style.left = "8px";
+    box.style.left = `${pad}px`;
+  }
+  if (box.getBoundingClientRect().top < pad) {
+    box.style.bottom = "auto";
+    box.style.top = `${r.bottom + gap}px`;
   }
   anchor.setAttribute("aria-expanded", "true");
   popoverEl = box;

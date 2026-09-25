@@ -3,6 +3,17 @@
 Target: pi-tauri_ui @ 7e66058 (PR #1 merged). Branch: `feat/batch2-ideas-1-7`.
 Exclusion: idea 8 (Tauri HTML viewer + adversarial-review skill) ships as a separate standalone project. No protocol changes to `pi --mode rpc`; no new npm/Rust deps; no polling (event-driven only, per AGENTS.md).
 
+## As-built deltas (post-review, post-feedback)
+
+The sections below are the reviewed text and are left intact for the review trail. These points changed while building or from later feedback:
+
+- §2 paths: inline `code` is now linkified too (pi usually wraps a path in backticks, so excluding `code` made the feature look broken). Fenced code and real links stay excluded. The actual reason clicks never worked was a bug, not format: `linkifyPaths` ran on a detached tree and its `isConnected` guard skipped every node. Regression checks cover plain, backticked, fenced, and link cases.
+- §2 backend: the opener is called via `tauri-plugin-opener`; the testable seam is `check_open_path` (extension allowlist + canonicalize both sides + inside-cwd), covered by a Rust test.
+- §6 spinner: the spinner deliberately KEEPS animating under `prefers-reduced-motion` (explicit user request — it is the only progress signal). It reuses `.run-spin` directly; no separate `.spin` class was added. The blue-dot pulse still respects the preference.
+- §7 backend: the parameter is `first_message` (snake_case, Tauri arg name); `learn_file` runs before `set_session_name` so naming has a session on disk.
+- Not in the plan: the first `pi_get_state` at boot sends `cwd: ""`, and `applyState` accepted it (`?? ` does not reject empty strings), which emptied the project list — the sidebar could render no chats at all. Both `cwd` and `sessionFile` now ignore empty values, and a stale `""` in `pi-expanded` is filtered. The dev preview mirrors the real backend's cwd fallback so this stays testable.
+- Not in the plan: the preview UI regression suite was red before this branch (it died on an undefined sidebar row). Fixtures now tag events with cwd+session like the backend, list created chats, and echo steering messages; 46/46 pass on a clean profile. A **Reset preview state** button was added because the suite reads real persisted state and drifts between runs.
+
 ## 0. Discoveries to confirm before coding (30 min, all read-only)
 
 - D1 — session-name persistence: backend `parse_session_preview` reads `session_info.name`, but real session files (v3) carry only a `{"type":"session",…}` header with no name. Check: rename a chat via RPC, then grep the session file for a name record; record the EXACT name-record shape (or its absence) — §7's badge depends on teaching the parser that shape or falling back to a localStorage coded-path set. Decides whether rename/auto-rename survive restart or are session-scoped.
