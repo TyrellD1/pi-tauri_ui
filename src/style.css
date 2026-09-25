@@ -222,6 +222,26 @@ h1 { margin: 0; }
   background: transparent; color: var(--muted); cursor: pointer;
 }
 .icon-action:hover { color: var(--ink); background: var(--surface); }
+.ctx-circle {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 10px 0 5px;
+  border: none; border-radius: var(--radius);
+  background: transparent; color: var(--muted); cursor: pointer;
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.ctx-circle:hover { color: var(--ink); background: var(--surface); }
+.ctx-circle svg { width: 22px; height: 22px; fill: none; stroke-width: 2.4; }
+.ctx-circle .ring-bg { stroke: var(--line); }
+.ctx-circle .ring-fg {
+  stroke: var(--quiet); stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: center;
+}
+.ctx-circle.hot { color: var(--warn); }
+.ctx-circle.hot .ring-fg { stroke: var(--warn); }
+.ctx-bar-usage { height: 6px; border-radius: 3px; background: var(--surface-deep); position: relative; margin: 12px 0 4px 0; overflow: visible; }
+.ctx-bar-usage .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--quiet); }
+.ctx-bar-usage .tick { position: absolute; top: -3px; bottom: -3px; left: 80%; width: 2px; background: var(--strong); }
+.ctx-bar-usage.hot .fill { background: var(--warn); }
 .icon-action svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .icon-action svg circle[fill] { fill: currentColor; }
 #btn-theme .sun { display: none; }

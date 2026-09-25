@@ -2216,6 +2216,7 @@ function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
   if (!preserveDialogs) { dialogs.clear(); dialogSlot.replaceChildren(); visibleDialogId = null; }
   queue = { steering: [], followUp: [] }; renderQueue();
+  lastUsage = null; renderCtxCircle();
   noticesEl.replaceChildren(); attachError.classList.add("hidden");
   extStatus = ""; streamActivity = "thinking"; streamActivityTool = ""; resetView();
 }
@@ -2338,15 +2339,104 @@ async function refreshModels() {
   }
 }
 
+// Last usage snapshot for the header context circle + popup (idea 1).
+interface UsageSnap {
+  tokens?: { input: number; output: number; total: number };
+  cost?: number;
+  contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
+}
+let lastUsage: UsageSnap | null = null;
+const ctxCircle = $("ctx-circle");
+const ctxPct = $("ctx-pct");
+const ctxRing = $("ctx-ring");
+const RING_C = 2 * Math.PI * 9;
+function renderCtxCircle() {
+  const pct = lastUsage?.contextUsage?.percent ?? null;
+  if (pct == null) {
+    ctxPct.textContent = "–";
+    ctxRing.setAttribute("stroke-dasharray", `0 ${RING_C.toFixed(1)}`);
+    ctxCircle.classList.remove("hot");
+    ctxCircle.setAttribute("aria-label", "Context usage unavailable");
+    return;
+  }
+  ctxPct.textContent = `${pct}%`;
+  ctxRing.setAttribute("stroke-dasharray", `${((pct / 100) * RING_C).toFixed(1)} ${RING_C.toFixed(1)}`);
+  ctxCircle.classList.toggle("hot", pct >= 80);
+  ctxCircle.setAttribute("aria-label", `Context ${pct}% full. Activate for details.`);
+}
+function openContextUsage() {
+  const u = lastUsage;
+  openModal("Context usage", (box, close) => {
+    const pct = u?.contextUsage?.percent ?? null;
+    const grid = document.createElement("div");
+    grid.className = "stat-grid";
+    const cells: [string, string][] = [
+      ["context", pct != null ? `${pct}%` : "—"],
+      ["context tok", u?.contextUsage?.tokens != null ? String(u.contextUsage.tokens) : "—"],
+      ["window", u?.contextUsage?.contextWindow != null ? String(u.contextUsage.contextWindow) : "—"],
+      ["input tok", u?.tokens ? String(u.tokens.input ?? "—") : "—"],
+      ["output tok", u?.tokens ? String(u.tokens.output ?? "—") : "—"],
+      ["cost", typeof u?.cost === "number" ? `$${u.cost.toFixed(4)}` : "—"],
+    ];
+    for (const [k, v] of cells) {
+      const cell = document.createElement("div");
+      cell.className = "stat-cell";
+      const kk = document.createElement("div");
+      kk.className = "k";
+      kk.textContent = k;
+      const vv = document.createElement("div");
+      vv.className = "v";
+      vv.textContent = v;
+      cell.appendChild(kk);
+      cell.appendChild(vv);
+      grid.appendChild(cell);
+    }
+    box.appendChild(grid);
+    if (pct != null) {
+      const bar = document.createElement("div");
+      bar.className = "ctx-bar-usage" + (pct >= 80 ? " hot" : "");
+      bar.title = "Progress vs the 80% compaction point";
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      fill.style.width = `${Math.min(100, pct)}%`;
+      const tick = document.createElement("div");
+      tick.className = "tick";
+      tick.title = "Compact around 80%";
+      bar.append(fill, tick);
+      box.appendChild(bar);
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.textContent = pct >= 80 ? "Past the compaction point — compact soon." : "Marker at 80% is the compaction point.";
+      box.appendChild(note);
+    } else {
+      const note = document.createElement("p");
+      note.className = "muted";
+      note.textContent = "No usage reported for this chat yet.";
+      box.appendChild(note);
+    }
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const compact = document.createElement("button");
+    compact.type = "button";
+    compact.textContent = "Compact now";
+    compact.onclick = () => { close(); void doCompact(); };
+    const done = document.createElement("button");
+    done.type = "button";
+    done.textContent = "Done";
+    done.className = "primary";
+    done.onclick = close;
+    row.append(compact, done);
+    box.appendChild(row);
+  });
+}
+ctxCircle.onclick = () => openContextUsage();
 async function refreshStats() {
   const gen = bootGen;
   try {
-    const s = (await invokeScoped("pi_get_stats")) as {
-      tokens?: { input: number; output: number; total: number };
-      cost?: number;
-      contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
-    };
+    const s = (await invokeScoped("pi_get_stats")) as UsageSnap;
     if (gen !== bootGen) return;
+    lastUsage = s;
+    renderCtxCircle();
     const parts: string[] = [];
     if (s.tokens) parts.push(`${((s.tokens.total ?? 0) / 1000).toFixed(1)}k tok`);
     if (typeof s.cost === "number") parts.push(`$${s.cost.toFixed(4)}`);
