@@ -49,7 +49,7 @@ Chats made by code carry a `[code]` name prefix (plus a local `code` badge that 
 - Secondary composer action queues the draft as `follow_up` (sent after this turn)
 - `⌘N` new chat · `⌘K` search · `⌘,` settings
 
-Header holds the title (double-click to rename), a context-usage circle (click for the usage popup with the 80% compaction marker), a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. Model + thinking controls live beside the composer. The composer foot shows a spinner while streaming plus the git branch (`⎇ main`, hidden outside repos). Right-click any chat for Open / Rename / group actions. `.md` / `.html` paths in chat render as buttons that open via the OS opener (allowlisted, project-scoped). ```json fences pretty-print and collapse past 50 lines without touching Copy.
+Header holds the title (double-click to rename), a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. The context-usage circle sits at the right end of the project/group strip above the composer (click for a popover with tokens, window, and the 80% compaction marker). Model + thinking controls live beside the composer. The composer foot shows a spinner while streaming plus the git branch (`⎇ main`, hidden outside repos). Right-click any chat for Open / Rename / group actions; right-click empty sidebar space for New coded chat. `.md` / `.html` paths in chat render as buttons that open via the OS opener (allowlisted, project-scoped). ```json fences pretty-print and collapse past 50 lines without touching Copy.
 
 ## Verify UI changes
 
