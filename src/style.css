@@ -246,22 +246,24 @@ h1 { margin: 0; }
 /* popover: floating surface anchored above its trigger, bottom-right flush
    with the trigger's right edge. First use: the context circle. */
 .popover {
-  position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 16px);
+  position: fixed; z-index: 60; width: 264px; max-width: calc(100vw - 16px);
   background: var(--page); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
-  padding: 12px 14px 10px;
+  padding: 12px 14px;
 }
-.popover h3 { margin: 0 0 6px 0; font-size: 13px; font-weight: 600; }
-.popover .stat-grid { margin-top: 4px; }
-.popover .muted { font-size: 12.5px; margin: 6px 0 0 0; }
+.popover h3 { margin: 0 0 10px 0; font-size: 12.5px; font-weight: 600; }
+.ctx-head { display: flex; align-items: baseline; gap: 8px; }
+.ctx-big { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.ctx-big.hot { color: var(--warn); }
+.ctx-sub { font-size: 12px; color: var(--muted); }
+.ctx-rows { margin: 12px 0 0 0; display: grid; grid-template-columns: 1fr auto; }
+.ctx-rows dt, .ctx-rows dd { margin: 0; padding: 5px 0; font-size: 12.5px; border-top: 1px solid var(--line); }
+.ctx-rows dt { color: var(--muted); }
+.ctx-rows dd { color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.ctx-note { margin: 10px 0 0 0; font-size: 11.5px; color: var(--quiet); }
 .popover .dialog-actions { margin-top: 10px; background: transparent; position: static; padding-top: 0; }
-.ctx-usage-row { display: flex; align-items: center; gap: 8px; margin: 10px 0 2px 0; }
-.ctx-usage-pct { font-size: 13px; font-variant-numeric: tabular-nums; color: var(--ink); flex-shrink: 0; min-width: 36px; }
-.ctx-bar-usage { height: 6px; border-radius: 3px; background: var(--surface-deep); position: relative; flex: 1; overflow: visible; }
-.ctx-bar-usage .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--quiet); }
-.ctx-bar-usage .tick { position: absolute; top: -3px; bottom: -3px; left: 80%; width: 2px; background: var(--strong); }
-.ctx-bar-usage.hot .fill { background: var(--warn); }
-.ctx-bar-usage { height: 6px; border-radius: 3px; background: var(--surface-deep); position: relative; margin: 12px 0 4px 0; overflow: visible; }
+.popover .dialog-actions button { font-size: 12px; padding: 5px 12px; }
+.ctx-bar-usage { height: 5px; border-radius: 3px; background: var(--surface-deep); position: relative; margin: 10px 0 0 0; overflow: visible; }
 .ctx-bar-usage .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--quiet); }
 .ctx-bar-usage .tick { position: absolute; top: -3px; bottom: -3px; left: 80%; width: 2px; background: var(--strong); }
 .ctx-bar-usage.hot .fill { background: var(--warn); }

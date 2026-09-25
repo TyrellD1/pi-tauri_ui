@@ -2522,43 +2522,33 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   });
   box.querySelector<HTMLElement>("button")?.focus();
 }
+function fmtCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
 function openContextUsage() {
   const u = lastUsage;
   openPopover(ctxCircle, (box, close) => {
+    const pct = u?.contextUsage?.percent ?? null;
+    const win = u?.contextUsage?.contextWindow ?? null;
     const h = document.createElement("h3");
     h.textContent = "Context usage";
     box.appendChild(h);
-    const pct = u?.contextUsage?.percent ?? null;
-    const grid = document.createElement("div");
-    grid.className = "stat-grid";
-    const cells: [string, string][] = [
-      ["context", pct != null ? `${pct}%` : "—"],
-      ["context tok", u?.contextUsage?.tokens != null ? String(u.contextUsage.tokens) : "—"],
-      ["window", u?.contextUsage?.contextWindow != null ? String(u.contextUsage.contextWindow) : "—"],
-      ["input tok", u?.tokens ? String(u.tokens.input ?? "—") : "—"],
-      ["output tok", u?.tokens ? String(u.tokens.output ?? "—") : "—"],
-      ["cost", typeof u?.cost === "number" ? `$${u.cost.toFixed(4)}` : "—"],
-    ];
-    for (const [k, v] of cells) {
-      const cell = document.createElement("div");
-      cell.className = "stat-cell";
-      const kk = document.createElement("div");
-      kk.className = "k";
-      kk.textContent = k;
-      const vv = document.createElement("div");
-      vv.className = "v";
-      vv.textContent = v;
-      cell.appendChild(kk);
-      cell.appendChild(vv);
-      grid.appendChild(cell);
-    }
-    box.appendChild(grid);
+
+    // One headline figure, one bar. The 80% marker is the compaction point.
+    const head = document.createElement("div");
+    head.className = "ctx-head";
+    const big = document.createElement("span");
+    big.className = "ctx-big" + (pct != null && pct >= 80 ? " hot" : "");
+    big.textContent = pct != null ? `${pct}%` : "—";
+    const sub = document.createElement("span");
+    sub.className = "ctx-sub";
+    sub.textContent = win != null ? `of ${fmtCount(win)} window` : "no window reported";
+    head.append(big, sub);
+    box.appendChild(head);
+
     if (pct != null) {
-      const row = document.createElement("div");
-      row.className = "ctx-usage-row";
-      const num = document.createElement("span");
-      num.className = "ctx-usage-pct";
-      num.textContent = `${pct}%`;
       const bar = document.createElement("div");
       bar.className = "ctx-bar-usage" + (pct >= 80 ? " hot" : "");
       bar.title = "Progress vs the 80% compaction point";
@@ -2569,30 +2559,41 @@ function openContextUsage() {
       tick.className = "tick";
       tick.title = "Compact around 80%";
       bar.append(fill, tick);
-      row.append(num, bar);
-      box.appendChild(row);
-      const note = document.createElement("p");
-      note.className = "muted";
-      note.textContent = pct >= 80 ? "Past the compaction point — compact soon." : "Marker at 80% is the compaction point.";
-      box.appendChild(note);
-    } else {
-      const note = document.createElement("p");
-      note.className = "muted";
-      note.textContent = "No usage reported for this chat yet.";
-      box.appendChild(note);
+      box.appendChild(bar);
     }
+
+    // Quiet label/value rows — no nested boxes inside a box.
+    const rows: [string, string][] = [
+      ["Context", u?.contextUsage?.tokens != null ? `${fmtCount(u.contextUsage.tokens)} tok` : "—"],
+      ["Input", u?.tokens ? `${fmtCount(u.tokens.input ?? 0)} tok` : "—"],
+      ["Output", u?.tokens ? `${fmtCount(u.tokens.output ?? 0)} tok` : "—"],
+      ["Cost", typeof u?.cost === "number" ? `$${u.cost.toFixed(4)}` : "—"],
+    ];
+    const list = document.createElement("dl");
+    list.className = "ctx-rows";
+    for (const [k, v] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      list.append(dt, dd);
+    }
+    box.appendChild(list);
+
+    const note = document.createElement("p");
+    note.className = "ctx-note";
+    note.textContent = pct == null
+      ? "No usage reported for this chat yet."
+      : pct >= 80 ? "Past the compaction point." : "Compacts around 80%.";
+    box.appendChild(note);
+
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const compact = document.createElement("button");
     compact.type = "button";
     compact.textContent = "Compact now";
     compact.onclick = () => { close(); void doCompact(); };
-    const done = document.createElement("button");
-    done.type = "button";
-    done.textContent = "Done";
-    done.className = "primary";
-    done.onclick = close;
-    row.append(compact, done);
+    row.appendChild(compact);
     box.appendChild(row);
   });
 }
