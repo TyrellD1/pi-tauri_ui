@@ -2083,6 +2083,7 @@ function chatContextBar(): HTMLElement {
     gb.onclick = () => openGroupPicker(gb);
     bar.appendChild(gb);
   }
+  bar.appendChild(ctxCircle);
   return bar;
 }
 async function pickProjectDir(dir: string) {
@@ -2452,8 +2453,18 @@ interface UsageSnap {
   contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
 }
 let lastUsage: UsageSnap | null = null;
-const ctxCircle = $("ctx-circle");
-const ctxRing = $("ctx-ring");
+// The context circle lives in the chat context bar (same line as project +
+// group, flush right). One persistent node re-appended on every bar render.
+const ctxCircle = document.createElement("button");
+ctxCircle.id = "ctx-circle";
+ctxCircle.type = "button";
+ctxCircle.className = "ctx-circle";
+ctxCircle.title = "Context usage";
+ctxCircle.setAttribute("aria-label", "Context usage");
+ctxCircle.setAttribute("aria-haspopup", "dialog");
+ctxCircle.setAttribute("aria-expanded", "false");
+ctxCircle.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-bg" cx="12" cy="12" r="9"/><circle id="ctx-ring" class="ring-fg" cx="12" cy="12" r="9"/></svg>`;
+const ctxRing = ctxCircle.querySelector("#ctx-ring") as SVGCircleElement;
 const RING_C = 2 * Math.PI * 9;
 function renderCtxCircle() {
   const pct = lastUsage?.contextUsage?.percent ?? null;

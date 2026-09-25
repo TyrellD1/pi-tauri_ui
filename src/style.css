@@ -241,6 +241,8 @@ h1 { margin: 0; }
   transform: rotate(-90deg); transform-origin: center;
 }
 .ctx-circle.hot .ring-fg { stroke: var(--warn); }
+#chat-context .ctx-bar { align-items: center; }
+#chat-context .ctx-circle { margin-left: auto; }
 /* popover: floating surface anchored above its trigger, bottom-right flush
    with the trigger's right edge. First use: the context circle. */
 .popover {
