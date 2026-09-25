@@ -37,7 +37,9 @@ npm run tauri build
 
 ## Sessions
 
-Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. A brand-new chat adopts its session file on the first accepted send, so its row appears without switching away. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+
+Chats made by code carry a `[code]` name prefix (plus a local `code` badge that survives restarts) and can be filed into groups on creation: right-click empty sidebar → New coded chat, or call the `pi_coded_chat` Tauri command (`{ cwd, name, first_message? }`) from a future extension.
 
 ## Shortcuts & send contract
 
@@ -47,7 +49,7 @@ Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` proc
 - Secondary composer action queues the draft as `follow_up` (sent after this turn)
 - `⌘N` new chat · `⌘K` search · `⌘,` settings
 
-Header holds the title, a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. Model + thinking controls live beside the composer.
+Header holds the title (double-click to rename), a context-usage circle (click for the usage popup with the 80% compaction marker), a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. Model + thinking controls live beside the composer. The composer foot shows a spinner while streaming plus the git branch (`⎇ main`, hidden outside repos). Right-click any chat for Open / Rename / group actions. `.md` / `.html` paths in chat render as buttons that open via the OS opener (allowlisted, project-scoped). ```json fences pretty-print and collapse past 50 lines without touching Copy.
 
 ## Verify UI changes
 
