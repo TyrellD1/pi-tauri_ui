@@ -2453,26 +2453,70 @@ interface UsageSnap {
 }
 let lastUsage: UsageSnap | null = null;
 const ctxCircle = $("ctx-circle");
-const ctxPct = $("ctx-pct");
 const ctxRing = $("ctx-ring");
 const RING_C = 2 * Math.PI * 9;
 function renderCtxCircle() {
   const pct = lastUsage?.contextUsage?.percent ?? null;
-  if (pct == null) {
-    ctxPct.textContent = "–";
-    ctxRing.setAttribute("stroke-dasharray", `0 ${RING_C.toFixed(1)}`);
-    ctxCircle.classList.remove("hot");
-    ctxCircle.setAttribute("aria-label", "Context usage unavailable");
-    return;
+  ctxRing.setAttribute(
+    "stroke-dasharray",
+    pct == null ? `0 ${RING_C.toFixed(1)}` : `${((pct / 100) * RING_C).toFixed(1)} ${RING_C.toFixed(1)}`
+  );
+  ctxCircle.classList.toggle("hot", pct != null && pct >= 80);
+  ctxCircle.setAttribute(
+    "aria-label",
+    pct == null ? "Context usage unavailable" : `Context ${pct}% full. Activate for details.`
+  );
+}
+// Popover primitive: floating surface above its trigger, bottom-right flush
+// with the trigger's right edge and a few pixels above it. Toggle on the
+// trigger, Esc or outside click to dismiss, focus restored on close.
+let popoverEl: HTMLElement | null = null;
+let popoverOutside: ((e: MouseEvent) => void) | null = null;
+function closePopover() {
+  popoverEl?.remove();
+  popoverEl = null;
+  ctxCircle.setAttribute("aria-expanded", "false");
+  if (popoverOutside) {
+    document.removeEventListener("mousedown", popoverOutside);
+    popoverOutside = null;
   }
-  ctxPct.textContent = `${pct}%`;
-  ctxRing.setAttribute("stroke-dasharray", `${((pct / 100) * RING_C).toFixed(1)} ${RING_C.toFixed(1)}`);
-  ctxCircle.classList.toggle("hot", pct >= 80);
-  ctxCircle.setAttribute("aria-label", `Context ${pct}% full. Activate for details.`);
+}
+function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () => void) => void) {
+  closePopover();
+  const box = document.createElement("div");
+  box.className = "popover";
+  box.setAttribute("role", "dialog");
+  build(box, closePopover);
+  document.body.appendChild(box);
+  const r = anchor.getBoundingClientRect();
+  box.style.width = `${Math.min(300, window.innerWidth - 16)}px`;
+  box.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+  box.style.bottom = `${window.innerHeight - r.top + 6}px`;
+  if (box.getBoundingClientRect().left < 8) {
+    box.style.right = "auto";
+    box.style.left = "8px";
+  }
+  anchor.setAttribute("aria-expanded", "true");
+  popoverEl = box;
+  popoverOutside = (e: MouseEvent) => {
+    if (!box.contains(e.target as Node) && !anchor.contains(e.target as Node)) closePopover();
+  };
+  document.addEventListener("mousedown", popoverOutside);
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closePopover();
+      anchor.focus();
+    }
+  });
+  box.querySelector<HTMLElement>("button")?.focus();
 }
 function openContextUsage() {
   const u = lastUsage;
-  openModal("Context usage", (box, close) => {
+  openPopover(ctxCircle, (box, close) => {
+    const h = document.createElement("h3");
+    h.textContent = "Context usage";
+    box.appendChild(h);
     const pct = u?.contextUsage?.percent ?? null;
     const grid = document.createElement("div");
     grid.className = "stat-grid";
@@ -2499,6 +2543,11 @@ function openContextUsage() {
     }
     box.appendChild(grid);
     if (pct != null) {
+      const row = document.createElement("div");
+      row.className = "ctx-usage-row";
+      const num = document.createElement("span");
+      num.className = "ctx-usage-pct";
+      num.textContent = `${pct}%`;
       const bar = document.createElement("div");
       bar.className = "ctx-bar-usage" + (pct >= 80 ? " hot" : "");
       bar.title = "Progress vs the 80% compaction point";
@@ -2509,7 +2558,8 @@ function openContextUsage() {
       tick.className = "tick";
       tick.title = "Compact around 80%";
       bar.append(fill, tick);
-      box.appendChild(bar);
+      row.append(num, bar);
+      box.appendChild(row);
       const note = document.createElement("p");
       note.className = "muted";
       note.textContent = pct >= 80 ? "Past the compaction point — compact soon." : "Marker at 80% is the compaction point.";
@@ -2535,7 +2585,10 @@ function openContextUsage() {
     box.appendChild(row);
   });
 }
-ctxCircle.onclick = () => openContextUsage();
+ctxCircle.onclick = () => {
+  if (popoverEl) closePopover();
+  else openContextUsage();
+};
 async function refreshStats() {
   const gen = bootGen;
   try {
