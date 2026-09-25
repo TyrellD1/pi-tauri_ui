@@ -2497,6 +2497,10 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   const box = document.createElement("div");
   box.className = "popover";
   box.setAttribute("role", "dialog");
+  // Focusable so Esc works and Tab reaches the actions, but focusing the
+  // surface itself keeps buttons from opening with a focus ring.
+  box.tabIndex = -1;
+  box.style.outline = "none";
   build(box, closePopover);
   document.body.appendChild(box);
   const r = anchor.getBoundingClientRect();
@@ -2520,7 +2524,7 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
       anchor.focus();
     }
   });
-  box.querySelector<HTMLElement>("button")?.focus();
+  box.focus();
 }
 function fmtCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
