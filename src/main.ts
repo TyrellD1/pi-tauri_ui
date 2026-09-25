@@ -621,6 +621,22 @@ function loadGroups(): ChatGroups {
   return {};
 }
 function saveGroups(g: ChatGroups) { prefSet("pi-chat-groups", JSON.stringify(g)); }
+// Chats made by code (idea 7). Names may not persist in session files (D1),
+// so the flag lives here next to groups and follows the same retention rule.
+const CODE_PREFIX = "[code]";
+function loadCoded(): string[] {
+  try {
+    const raw = prefGet("pi-coded-chats");
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    return Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : [];
+  } catch { return []; }
+}
+function saveCoded(paths: string[]) { prefSet("pi-coded-chats", JSON.stringify(paths)); }
+function isCoded(name: string | null, path: string): boolean {
+  if (name?.startsWith(CODE_PREFIX)) return true;
+  try { return (JSON.parse(prefGet("pi-coded-chats") ?? "[]") as string[]).includes(path); }
+  catch { return false; }
+}
 function groupClosed(): Set<string> {
   try {
     const a = JSON.parse(prefGet("pi-groups-closed") ?? "[]") as unknown;
@@ -729,6 +745,8 @@ async function refreshAllProjects() {
       if (kept.length !== arr.length) { g[n] = kept; gdirty = true; }
     }
     if (gdirty) saveGroups(g);
+    const coded = loadCoded().filter((p) => paths.has(p));
+    if (coded.length !== loadCoded().length) saveCoded(coded);
     if (pruned) saveUnseen();
   }
   renderProjects();
@@ -981,6 +999,13 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   el.dataset.project = project;
   const rkey = `${project}:${s.path}`;
   const rlabel = s.name || s.preview.slice(0, 60) || "Untitled";
+  if (isCoded(s.name, s.path)) {
+    const badge = document.createElement("span");
+    badge.className = "code-badge";
+    badge.textContent = "code";
+    badge.title = "Made by code";
+    row.appendChild(badge);
+  }
   if (runningSet.has(rkey)) {
     const spin = document.createElement("span");
     spin.className = "run-spin";
@@ -1585,9 +1610,90 @@ function removeFromGroup(name: string, path: string) {
   notify({ text: `Removed from ${name}.` });
   renderProjects();
 }
+async function newCodedChat(opts: { name: string; group?: string; firstMessage?: string }): Promise<string | null> {
+  const name = opts.name.trim();
+  if (!name) return null;
+  if (navigating || booting || sendInFlight) { notify({ text: "One moment — try again when idle." }); return null; }
+  let path: string;
+  try {
+    const r = await invokeChecked<{ path: string }>("pi_coded_chat", {
+      cwd, name, first_message: opts.firstMessage?.trim() ? opts.firstMessage : null,
+    });
+    path = r.path;
+  } catch (e) {
+    notify({ text: `Couldn't make coded chat: ${String(e)}`, kind: "error", sticky: true });
+    return null;
+  }
+  // Item-5 refresh never fires for coded chats (no submit/settle), so list
+  // first and only claim group/badge for a path that's actually there (R2-F2).
+  await refreshSessions();
+  await refreshAllProjects();
+  const listed = [...projectChats.values()].some((list) => list.some((s) => s.path === path));
+  if (!listed) { notify({ text: "Chat was made but isn't listed yet — reopen the project.", kind: "error" }); return null; }
+  if (!isCoded(`${CODE_PREFIX} ${name}`, path)) saveCoded([...loadCoded(), path]);
+  const group = opts.group?.trim();
+  if (group) {
+    const g = loadGroups();
+    if (!g[group]) g[group] = [];
+    if (!g[group].includes(path)) g[group].push(path);
+    saveGroups(g);
+  }
+  renderProjects();
+  await openSession(cwd, path);
+  return path;
+}
+function openNewCodedChat() {
+  openModal("New coded chat", (box, close) => {
+    const mkField = (label: string, id: string, ph: string) => {
+      const lab = document.createElement("label");
+      lab.textContent = label;
+      lab.setAttribute("for", id);
+      const inp = document.createElement("input");
+      inp.id = id;
+      inp.placeholder = ph;
+      box.append(lab, inp);
+      return inp;
+    };
+    const nameInp = mkField("Name", "cc-name", "e.g. nightly-review");
+    const groupInp = mkField("Group (optional)", "cc-group", "e.g. agents");
+    const mLab = document.createElement("label");
+    mLab.textContent = "First message (optional)";
+    mLab.setAttribute("for", "cc-msg");
+    const msgInp = document.createElement("textarea");
+    msgInp.id = "cc-msg";
+    msgInp.rows = 3;
+    msgInp.placeholder = "Sent as the first prompt";
+    box.append(mLab, msgInp);
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const c = document.createElement("button");
+    c.type = "button";
+    c.textContent = "Cancel";
+    c.onclick = close;
+    const s = document.createElement("button");
+    s.type = "button";
+    s.textContent = "Create";
+    s.className = "primary";
+    s.onclick = async () => {
+      const name = nameInp.value.trim();
+      if (!name) { nameInp.focus(); return; }
+      close();
+      await newCodedChat({ name, group: groupInp.value, firstMessage: msgInp.value });
+    };
+    row.append(c, s);
+    box.appendChild(row);
+    nameInp.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) s.click(); });
+  });
+}
 chatListEl.addEventListener("contextmenu", (e) => {
   const item = (e.target as HTMLElement).closest(".chat-item") as HTMLElement | null;
-  if (!item || !item.dataset.path) return;
+  if (!item || !item.dataset.path) {
+    // Empty sidebar background: offer creation instead of nothing.
+    if ((e.target as HTMLElement).closest("button,input,.parent-body")) return;
+    e.preventDefault();
+    openMenu([{ label: "New coded chat…", onPick: openNewCodedChat }], { left: e.clientX, top: e.clientY }, "Sidebar");
+    return;
+  }
   e.preventDefault();
   const groupSection = item.closest(".group-section") as HTMLElement | null;
   openChatMenu(e.clientX, e.clientY, {
