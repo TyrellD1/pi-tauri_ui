@@ -2152,6 +2152,7 @@ function renderStatus() {
   statusLine.textContent = label;
   runSpin.classList.toggle("hidden", !streaming);
   runSpin.setAttribute("aria-label", streaming ? label : "Idle");
+}
 
 function hasDraft(): boolean {
   return inputEl.value.trim().length > 0 || pendingImages.length > 0;
