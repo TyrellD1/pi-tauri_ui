@@ -1,0 +1,2 @@
+b8c04b97f0224432df15fad5094855bfab48050aa4b3fde4da435ad19d85bc4a  docs/batch2-plan.md
+7e66058 Merge pull request #1 from TyrellD1/feat/groups-and-run-states

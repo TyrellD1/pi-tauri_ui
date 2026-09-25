@@ -154,9 +154,16 @@ h1 { margin: 0; }
 }
 .chat-item[aria-current="true"] .ci-title { font-weight: 500; }
 .chat-item .ci-time { font-size: 11px; color: var(--quiet); flex-shrink: 0; }
+.code-badge {
+  font-size: 10px; color: var(--quiet); border: 1px solid var(--line); border-radius: 4px;
+  padding: 0 5px; line-height: 16px; flex-shrink: 0; align-self: center;
+  font-family: var(--mono);
+}
 .run-spin { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--quiet); border-top-color: transparent; flex-shrink: 0; align-self: center; animation: run-rotate 0.9s linear infinite; }
 @keyframes run-rotate { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .run-spin { animation: none; border-top-color: var(--quiet); } }
+/* The spinner is a deliberate exception to reduced-motion: it is the only
+   progress signal while a turn runs, so it keeps rotating (Tyrell keeps
+   reduced-motion on for unrelated reasons). */
 .parent-head .p-name { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.7px; color: var(--quiet); font-family: var(--mono); }
 .parent-section + .parent-section { margin-top: 10px; }
 .path-row { display: flex; gap: 8px; }
@@ -212,8 +219,6 @@ h1 { margin: 0; }
   font-weight: 600; font-size: 14px; letter-spacing: -0.015em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.chat-sub { font-size: 12px; color: var(--quiet); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-sub.hidden { display: none; }
 .header-actions { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .icon-action {
   display: inline-flex; align-items: center; justify-content: center;
@@ -222,6 +227,46 @@ h1 { margin: 0; }
   background: transparent; color: var(--muted); cursor: pointer;
 }
 .icon-action:hover { color: var(--ink); background: var(--surface); }
+.ctx-circle {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0;
+  border: none; border-radius: var(--radius);
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.ctx-circle:hover { color: var(--ink); background: var(--surface); }
+.ctx-circle svg { width: 22px; height: 22px; fill: none; stroke-width: 2.4; }
+.ctx-circle .ring-bg { stroke: var(--line); }
+.ctx-circle .ring-fg {
+  stroke: var(--quiet); stroke-linecap: round;
+  transform: rotate(-90deg); transform-origin: center;
+}
+.ctx-circle.hot .ring-fg { stroke: var(--warn); }
+#chat-context .ctx-bar { align-items: center; width: 100%; }
+#chat-context .ctx-circle { margin-left: auto; }
+/* popover: floating surface anchored above its trigger, bottom-right flush
+   with the trigger's right edge. First use: the context circle. */
+.popover {
+  position: fixed; z-index: 60; width: 264px; max-width: calc(100vw - 16px);
+  background: var(--page); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+  padding: 12px 14px;
+}
+.popover h3 { margin: 0 0 10px 0; font-size: 12.5px; font-weight: 600; }
+.ctx-head { display: flex; align-items: baseline; gap: 8px; }
+.ctx-big { font-size: 24px; font-weight: 600; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.ctx-big.hot { color: var(--warn); }
+.ctx-sub { font-size: 12px; color: var(--muted); }
+.ctx-rows { margin: 12px 0 0 0; display: grid; grid-template-columns: 1fr auto; }
+.ctx-rows dt, .ctx-rows dd { margin: 0; padding: 5px 0; font-size: 12.5px; border-top: 1px solid var(--line); }
+.ctx-rows dt { color: var(--muted); }
+.ctx-rows dd { color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.ctx-note { margin: 10px 0 0 0; font-size: 11.5px; color: var(--quiet); }
+.popover .dialog-actions { margin-top: 10px; background: transparent; position: static; padding-top: 0; }
+.popover .dialog-actions button { font-size: 12px; padding: 5px 12px; }
+.ctx-bar-usage { height: 5px; border-radius: 3px; background: var(--surface-deep); position: relative; margin: 10px 0 0 0; overflow: visible; }
+.ctx-bar-usage .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: var(--quiet); }
+.ctx-bar-usage .tick { position: absolute; top: -3px; bottom: -3px; left: 80%; width: 2px; background: var(--strong); }
+.ctx-bar-usage.hot .fill { background: var(--warn); }
 .icon-action svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .icon-action svg circle[fill] { fill: currentColor; }
 #btn-theme .sun { display: none; }
@@ -270,6 +315,14 @@ h1 { margin: 0; }
 .assistant-block .md ul, .assistant-block .md ol { margin: 8px 0; padding-left: 22px; }
 .assistant-block .md li { margin-bottom: 3px; }
 .assistant-block .md a { color: inherit; text-underline-offset: 3px; }
+.path-link {
+  background: none; border: none; padding: 0; font: inherit; color: inherit;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+  cursor: pointer; word-break: break-all;
+}
+.path-link:hover, .path-link:focus-visible { color: var(--ink); }
+.path-link.in-code { text-decoration: none; border-bottom: 1px dotted var(--quiet); }
+.path-link.in-code:hover, .path-link.in-code:focus-visible { border-bottom-color: var(--ink); }
 .assistant-block .md blockquote { border-left: 2px solid var(--strong); margin: 10px 0; padding-left: 12px; color: var(--muted); }
 
 /* code blocks: one surface, language/copy row */
@@ -286,6 +339,9 @@ h1 { margin: 0; }
 }
 .codeblock-head button:hover, .codeblock-head button:focus-visible { color: var(--ink); opacity: 1; }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+.codeblock.json-long.json-collapsed pre { max-height: 320px; overflow-y: hidden; }
+.codeblock-head span:first-child { margin-right: auto; }
+.codeblock-head button + button { margin-left: 6px; }
 .codeblock pre code { font-family: var(--mono); background: none; padding: 0; font-size: inherit; }
 
 /* user messages: restrained right-aligned fill */
@@ -486,7 +542,9 @@ body.hide-tools .tool-disclosure[data-failed="true"] { display: block; }
 .composer-hint { margin-left: auto; font-size: 11px; color: var(--quiet); white-space: nowrap; }
 .composer-foot { display: flex; gap: 10px; align-items: baseline; margin-top: 6px; font-size: 11.5px; color: var(--quiet); min-height: 18px; }
 #status-line { flex-shrink: 0; }
-#token-line { margin-left: auto; flex-shrink: 0; }
+#token-line { flex-shrink: 0; }
+#run-spin.hidden, #branch-line.hidden { display: none; }
+#branch-line { margin-left: auto; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40%; }
 .ctx-warn { color: var(--warn); }
 .ctx-warn.hidden { display: none; }
 .ctx-warn button {
@@ -572,6 +630,12 @@ body.hide-tools .tool-disclosure[data-failed="true"] { display: block; }
 .modal label { display: block; font-size: 12px; font-weight: 600; margin: 10px 0 4px 0; }
 .modal input { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 13px; background: var(--page); color: var(--ink); font-family: var(--font); }
 .modal input:focus { border-color: var(--quiet); outline: none; }
+.modal textarea {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+  font-size: 13px; background: var(--page); color: var(--ink); font-family: var(--font);
+  resize: vertical; min-height: 60px;
+}
+.modal textarea:focus { border-color: var(--quiet); outline: none; }
 .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
 .stat-cell { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; }
 .stat-cell .k { font-size: 10.5px; color: var(--quiet); text-transform: uppercase; letter-spacing: 0.5px; font-family: var(--font); }

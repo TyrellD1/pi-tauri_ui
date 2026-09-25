@@ -38,7 +38,15 @@ export function renderMarkdown(src: string): string {
     if (fence) {
       flush(); const code: string[] = []; while (++i < lines.length && !/^```\s*$/.test(lines[i])) code.push(lines[i]);
       const lang = fence[1].trim() || "code";
-      html += `<div class="codeblock"><div class="codeblock-head"><span>${esc(lang)}</span><button type="button" data-copy-code>Copy</button></div><pre><code>${esc(code.join("\n"))}</code></pre></div>`;
+      let body = code.join("\n"), jsonLong = false;
+      if (lang.toLowerCase() === "json") {
+        // Render JSON right: pretty-print when it parses, show as-is when not.
+        try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { /* keep raw */ }
+        jsonLong = body.split("\n").length > 50;
+      }
+      // Long JSON collapses visually only — the full text stays in the DOM
+      // so Copy keeps copying everything.
+      html += `<div class="codeblock${jsonLong ? " json-long json-collapsed" : ""}"><div class="codeblock-head"><span>${esc(lang)}</span>${jsonLong ? `<button type="button" data-toggle-json>Show more</button>` : ""}<button type="button" data-copy-code>Copy</button></div><pre><code>${esc(body)}</code></pre></div>`;
       continue;
     }
     const delim = lines[i+1] ? cells(lines[i+1]) : [];

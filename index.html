@@ -57,7 +57,6 @@
         <header id="chat-header">
           <div class="chat-title-wrap">
             <h1 id="chat-title">New chat</h1>
-            <div id="chat-sub" class="chat-sub hidden"></div>
           </div>
           <div class="header-actions">
             <button id="btn-menu" class="icon-action" type="button" aria-label="Conversation actions" aria-haspopup="menu" aria-expanded="false" title="Conversation actions">
@@ -109,9 +108,11 @@
             <span class="composer-hint" title="Enter sends · Shift+Enter adds a line · Esc stops">Enter sends · ⇧↵ newline · Esc stops</span>
           </div>
           <div class="composer-foot">
+            <span id="run-spin" class="run-spin hidden" role="img" aria-label="Working"></span>
             <span id="status-line" role="status">Ready</span>
             <span id="ctx-warn" class="ctx-warn hidden"></span>
             <span id="token-line"></span>
+            <span id="branch-line" class="branch-line hidden"></span>
           </div>
         </div>
       </main>

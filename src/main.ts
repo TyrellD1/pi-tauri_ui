@@ -34,10 +34,11 @@ const sendBtn = $("btn-send") as HTMLButtonElement;
 const stopBtn = $("btn-stop") as HTMLButtonElement;
 const queueBtn = $("btn-queue") as HTMLButtonElement;
 const statusLine = $("status-line");
+const runSpin = $("run-spin");
+const branchLine = $("branch-line");
 const tokenLine = $("token-line");
 const ctxWarn = $("ctx-warn");
 const chatTitle = $("chat-title");
-const chatSub = $("chat-sub");
 const cwdBtn = $("btn-cwd") as HTMLButtonElement;
 const cwdLabel = $("cwd-label");
 const searchEl = $("search") as HTMLInputElement;
@@ -64,7 +65,9 @@ let unlinked: { slug: string; sessions: SessionInfo[] }[] = [];
 let expandedProjects = new Set<string>();
 try {
   const raw = prefGet("pi-expanded");
-  if (raw) expandedProjects = new Set(JSON.parse(raw) as string[]);
+  // Drop empty/junk entries: a stale "" here leaves the active project
+  // collapsed, which reads as "my chats disappeared".
+  if (raw) expandedProjects = new Set((JSON.parse(raw) as unknown[]).filter((p): p is string => typeof p === "string" && !!p.trim()));
 } catch {
   /* ignore */
 }
@@ -348,6 +351,8 @@ menuBtn.onclick = (e) => {
   if (menuRoot.innerHTML) closeMenu();
   else openHeaderMenu();
 };
+chatTitle.title = "Double-click to rename";
+chatTitle.ondblclick = () => { if (!booting && !bootError) openRename(); };
 
 // ---------- modals (accessible dialog, focus trap + restore) ----------
 let modalPrevFocus: HTMLElement | null = null;
@@ -444,14 +449,18 @@ function openSettings() {
   });
 }
 
-function openRename() {
+function rowName(project: string, path: string): string {
+  const s = (projectChats.get(project) ?? []).find((x) => x.path === path);
+  return s?.name ?? s?.preview.slice(0, 48) ?? "";
+}
+function openRename(target?: { cwd: string; session: string | null; current: string }) {
   openModal("Rename chat", (box, close) => {
     const lab = document.createElement("label");
     lab.textContent = "Name";
     lab.setAttribute("for", "m-name");
     const inp = document.createElement("input");
     inp.id = "m-name";
-    inp.value = chatTitle.textContent === "New chat" ? "" : chatTitle.textContent ?? "";
+    inp.value = target?.current ?? (chatTitle.textContent === "New chat" ? "" : chatTitle.textContent ?? "");
     inp.placeholder = "e.g. refactor-auth";
     const row = document.createElement("div");
     row.className = "dialog-actions";
@@ -468,11 +477,23 @@ function openRename() {
       close();
       if (!name) return;
       try {
-        await invokeScoped("pi_set_name", { name });
-        await refreshState();
-        await refreshSessions();
+        if (target && (target.session !== activePath || target.cwd !== cwd)) {
+          // Row rename: direct scoped call, never via targetScope (R2-F1's
+          // sibling — the global override would retarget every command).
+          if (target.session && runningSet.has(`${target.cwd}:${target.session}`)) {
+            notify({ text: "Wait for the turn to finish before renaming." });
+            return;
+          }
+          await invokeChecked("pi_set_name", { cwd: target.cwd, session: target.session, name });
+          await refreshSessions();
+          await refreshAllProjects();
+        } else {
+          await invokeScoped("pi_set_name", { name });
+          await refreshState();
+          await refreshSessions();
+        }
       } catch (e) {
-        notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: openRename });
+        notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openRename(target) });
       }
     };
     row.appendChild(c);
@@ -601,6 +622,32 @@ function loadGroups(): ChatGroups {
   return {};
 }
 function saveGroups(g: ChatGroups) { prefSet("pi-chat-groups", JSON.stringify(g)); }
+// Chats made by code (idea 7). Names may not persist in session files (D1),
+// so the flag lives here next to groups and follows the same retention rule.
+// The set is cached in memory: isCoded runs per sidebar row, so parsing
+// localStorage on every row would cost 100 JSON.parse calls per render.
+const CODE_PREFIX = "[code]";
+let codedCache: Set<string> | null = null;
+function codedSet(): Set<string> {
+  if (codedCache) return codedCache;
+  try {
+    const raw = prefGet("pi-coded-chats");
+    const arr = raw ? (JSON.parse(raw) as unknown) : [];
+    codedCache = new Set(
+      Array.isArray(arr) ? arr.filter((p): p is string => typeof p === "string" && !!p) : []
+    );
+  } catch {
+    codedCache = new Set();
+  }
+  return codedCache;
+}
+function saveCoded(paths: string[]) {
+  codedCache = new Set(paths);
+  prefSet("pi-coded-chats", JSON.stringify(paths));
+}
+function isCoded(name: string | null, path: string): boolean {
+  return !!name?.startsWith(CODE_PREFIX) || codedSet().has(path);
+}
 function groupClosed(): Set<string> {
   try {
     const a = JSON.parse(prefGet("pi-groups-closed") ?? "[]") as unknown;
@@ -709,6 +756,8 @@ async function refreshAllProjects() {
       if (kept.length !== arr.length) { g[n] = kept; gdirty = true; }
     }
     if (gdirty) saveGroups(g);
+    const coded = [...codedSet()].filter((p) => paths.has(p));
+    if (coded.length !== codedSet().size) saveCoded(coded);
     if (pruned) saveUnseen();
   }
   renderProjects();
@@ -961,6 +1010,13 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   el.dataset.project = project;
   const rkey = `${project}:${s.path}`;
   const rlabel = s.name || s.preview.slice(0, 60) || "Untitled";
+  if (isCoded(s.name, s.path)) {
+    const badge = document.createElement("span");
+    badge.className = "code-badge";
+    badge.textContent = "code";
+    badge.title = "Made by code";
+    row.appendChild(badge);
+  }
   if (runningSet.has(rkey)) {
     const spin = document.createElement("span");
     spin.className = "run-spin";
@@ -1505,6 +1561,10 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     return subBtns;
   };
   if (target.project) addItem("Open chat", () => openChat(target.project!, target.path));
+  addItem("Rename chat", () => {
+    const pcwd = target.project ?? findProjectForPath(target.path) ?? cwd;
+    openRename({ cwd: pcwd, session: target.path, current: rowName(pcwd, target.path) });
+  });
   if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
   const trigger = addItem("Add to group ›", () => {
     if (sub) hideSub();
@@ -1561,9 +1621,92 @@ function removeFromGroup(name: string, path: string) {
   notify({ text: `Removed from ${name}.` });
   renderProjects();
 }
+async function newCodedChat(opts: { name: string; group?: string; firstMessage?: string }): Promise<string | null> {
+  const name = opts.name.trim();
+  if (!name) return null;
+  if (navigating || booting || sendInFlight) { notify({ text: "One moment — try again when idle." }); return null; }
+  if (dialogs.size) { notify({ text: "Answer the pending request before creating a chat." }); return null; }
+  const first = opts.firstMessage?.trim();
+  let path: string;
+  try {
+    const r = await invokeChecked<{ path: string }>("pi_coded_chat", {
+      cwd, name, first_message: first ? first : null,
+    });
+    path = r.path;
+  } catch (e) {
+    notify({ text: `Couldn't make coded chat: ${String(e)}`, kind: "error", sticky: true });
+    return null;
+  }
+  // Item-5 refresh never fires for coded chats (no submit/settle), so list
+  // first and only claim group/badge for a path that's actually there (R2-F2).
+  await refreshSessions();
+  await refreshAllProjects();
+  const listed = [...projectChats.values()].some((list) => list.some((s) => s.path === path));
+  if (!listed) { notify({ text: "Chat was made but isn't listed yet — reopen the project.", kind: "error" }); return null; }
+  if (!isCoded(`${CODE_PREFIX} ${name}`, path)) saveCoded([...codedSet(), path]);
+  const group = opts.group?.trim();
+  if (group) {
+    const g = loadGroups();
+    if (!g[group]) g[group] = [];
+    if (!g[group].includes(path)) g[group].push(path);
+    saveGroups(g);
+  }
+  renderProjects();
+  await openSession(cwd, path);
+  return path;
+}
+function openNewCodedChat() {
+  openModal("New coded chat", (box, close) => {
+    const mkField = (label: string, id: string, ph: string) => {
+      const lab = document.createElement("label");
+      lab.textContent = label;
+      lab.setAttribute("for", id);
+      const inp = document.createElement("input");
+      inp.id = id;
+      inp.placeholder = ph;
+      box.append(lab, inp);
+      return inp;
+    };
+    const nameInp = mkField("Name", "cc-name", "e.g. nightly-review");
+    const groupInp = mkField("Group (optional)", "cc-group", "e.g. agents");
+    const mLab = document.createElement("label");
+    mLab.textContent = "First message (optional)";
+    mLab.setAttribute("for", "cc-msg");
+    const msgInp = document.createElement("textarea");
+    msgInp.id = "cc-msg";
+    msgInp.rows = 3;
+    msgInp.placeholder = "Sent as the first prompt";
+    box.append(mLab, msgInp);
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const c = document.createElement("button");
+    c.type = "button";
+    c.textContent = "Cancel";
+    c.onclick = close;
+    const s = document.createElement("button");
+    s.type = "button";
+    s.textContent = "Create";
+    s.className = "primary";
+    s.onclick = async () => {
+      const name = nameInp.value.trim();
+      if (!name) { nameInp.focus(); return; }
+      close();
+      await newCodedChat({ name, group: groupInp.value, firstMessage: msgInp.value });
+    };
+    row.append(c, s);
+    box.appendChild(row);
+    nameInp.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.isComposing) s.click(); });
+  });
+}
 chatListEl.addEventListener("contextmenu", (e) => {
   const item = (e.target as HTMLElement).closest(".chat-item") as HTMLElement | null;
-  if (!item || !item.dataset.path) return;
+  if (!item || !item.dataset.path) {
+    // Empty sidebar background: offer creation instead of nothing.
+    if ((e.target as HTMLElement).closest("button,input,.parent-body")) return;
+    e.preventDefault();
+    openMenu([{ label: "New coded chat…", onPick: openNewCodedChat }], { left: e.clientX, top: e.clientY }, "Sidebar");
+    return;
+  }
   e.preventDefault();
   const groupSection = item.closest(".group-section") as HTMLElement | null;
   openChatMenu(e.clientX, e.clientY, {
@@ -1775,6 +1918,57 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
     if (img.isConnected) fallback();
   }
 }
+// Clickable chat paths (idea 2): .md/.html tokens become buttons that open
+// via the allowlisted backend command. Fenced code and real links are left
+// alone; inline `code` is included because that is how pi usually prints a
+// path. NOTE: this runs on a detached tree (the block is appended after), so
+// never test isConnected here — only whether the node still has a parent.
+// A fresh regex per pass: a shared /g/ instance carries lastIndex between
+// test() and matchAll(), which is easy to get wrong later.
+const pathTokenRe = () => /(^|[\s("'\[>])([\w.~\-/]+\.(md|html))\b/gi;
+function linkifyPaths(root: ParentNode) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const targets: Text[] = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode as Text;
+    const p = n.parentElement;
+    if (!p || p.closest("pre,a,button")) continue;
+    if (pathTokenRe().test(n.data)) targets.push(n);
+  }
+  for (const n of targets) {
+    if (!n.parentNode) continue;
+    const inCode = n.parentElement?.tagName === "CODE";
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of n.data.matchAll(pathTokenRe())) {
+      const idx = m.index ?? 0;
+      const raw = m[2] ?? "";
+      if (!raw || raw.includes("://")) continue;
+      frag.append(n.data.slice(last, idx) + (m[1] ?? ""));
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "path-link" + (inCode ? " in-code" : "");
+      b.textContent = raw;
+      b.dataset.openPath = raw;
+      b.title = `Open ${raw}`;
+      frag.append(b);
+      last = idx + m[0].length;
+    }
+    frag.append(n.data.slice(last));
+    n.replaceWith(frag);
+  }
+}
+messagesInner.addEventListener("click", async (e) => {
+  const b = (e.target as HTMLElement).closest("[data-open-path]") as HTMLElement | null;
+  if (!b) return;
+  const raw = b.dataset.openPath ?? "";
+  // Direct call with explicit cwd: opening a file must never spawn a pi process.
+  try {
+    await invokeChecked("pi_open_path", { cwd, path: raw });
+  } catch (err) {
+    notify({ text: `Couldn't open ${raw}: ${String(err)}`, kind: "error" });
+  }
+});
 function assistantTextBlock(text: string, key: string, images?: { data: string; mime: string }[]): HTMLElement {
   const div = document.createElement("div");
   div.className = "assistant-block";
@@ -1783,6 +1977,7 @@ function assistantTextBlock(text: string, key: string, images?: { data: string; 
     md.className = "md";
     md.innerHTML = renderMarkdown(text);
     resolveMdImages(md);
+    linkifyPaths(md);
     div.appendChild(md);
   }
   for (const im of images ?? []) {
@@ -1905,6 +2100,7 @@ function chatContextBar(): HTMLElement {
     gb.onclick = () => openGroupPicker(gb);
     bar.appendChild(gb);
   }
+  bar.appendChild(ctxCircle);
   return bar;
 }
 async function pickProjectDir(dir: string) {
@@ -1969,7 +2165,7 @@ function renderSettled() {
         let md = view.node.querySelector<HTMLElement>(".md");
         if (!md) { md = document.createElement("div"); md.className = "md"; view.node.prepend(md); }
         // Only the changed prose block is re-parsed; tools and prior prose stay untouched.
-        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) { md.innerHTML = renderMarkdown(b.text); resolveMdImages(md); }
+        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) { md.innerHTML = renderMarkdown(b.text); resolveMdImages(md); linkifyPaths(md); }
       }
       view.block = b;
     }
@@ -1981,6 +2177,17 @@ function renderSettled() {
   messagesInner.querySelectorAll<HTMLButtonElement>(".retry-btn").forEach(b => b.disabled = streaming || stopping || booting || !!bootError || !!sendInFlight);
 }
 
+// long-JSON collapse toggle (visual only — full text stays for Copy)
+messagesInner.addEventListener("click", (e) => {
+  const tgl = (e.target as HTMLElement).closest("[data-toggle-json]") as HTMLButtonElement | null;
+  if (tgl) {
+    const box = tgl.closest(".codeblock");
+    if (!box) return;
+    const collapsed = box.classList.toggle("json-collapsed");
+    tgl.textContent = collapsed ? "Show more" : "Show less";
+    return;
+  }
+});
 // code-copy delegation (copies decoded full code, only confirms on success)
 messagesInner.addEventListener("click", async (e) => {
   const btn = (e.target as HTMLElement).closest("[data-copy-code]") as HTMLButtonElement | null;
@@ -2029,6 +2236,42 @@ async function invokeScoped<T>(cmd: string, params: Record<string, unknown> = {}
   return invokeChecked<T>(cmd, { ...params, ...visibleScope() });
 }
 
+// Git branch for the status cluster (idea 6). Cached per cwd, refreshed on
+// every chat open; null = not a repo, shown as nothing. Needs no pi process.
+// Git branch for the status cluster (idea 6). Cached per cwd so the sync
+// renderer can show it; refetched on every chat open, null = not a repo.
+const branchCache = new Map<string, string | null>();
+function setBranch(dir: string, branch: string | null) {
+  branchCache.set(dir, branch);
+  while (branchCache.size > 50) {
+    const first = branchCache.keys().next().value as string | undefined;
+    if (first === undefined || first === dir) break;
+    branchCache.delete(first);
+  }
+}
+function renderBranch() {
+  const b = branchCache.get(cwd) ?? null;
+  if (b) {
+    branchLine.textContent = `\u2387 ${b}`;
+    branchLine.title = `Git branch: ${b}`;
+    branchLine.classList.remove("hidden");
+  } else {
+    branchLine.textContent = "";
+    branchLine.title = "";
+    branchLine.classList.add("hidden");
+  }
+}
+async function refreshBranch() {
+  if (!cwd) return;
+  const dir = cwd;
+  try {
+    const r = await invokeChecked<{ branch: string | null }>("pi_git_branch", { cwd: dir });
+    setBranch(dir, r.branch);
+  } catch {
+    setBranch(dir, null);
+  }
+  if (dir === cwd) renderBranch();
+}
 function renderStatus() {
   let label: string;
   if (booting) label = "Connecting…";
@@ -2042,6 +2285,8 @@ function renderStatus() {
   } else if (extStatus) label = extStatus;
   else label = activityLabel("idle");
   statusLine.textContent = label;
+  runSpin.classList.toggle("hidden", !streaming);
+  runSpin.setAttribute("aria-label", streaming ? label : "Idle");
 }
 
 function hasDraft(): boolean {
@@ -2081,6 +2326,9 @@ function updateSendState() {
 // events must never render into the visible chat). runningSet drives the
 // unseen-finished blue dots in the sidebar (running rows use the spinner).
 const runningSet = new Set<string>();
+// Adopted session file not yet visible in the sidebar list (idea 5). One-shot
+// backup refresh on settle, then cleared either way — never a standing flag.
+let adoptedUnlisted: string | null = null;
 // Chats whose background run finished while you weren't looking. Blue dot
 // until opened. Persisted so it survives app restarts.
 let unseenFinished = new Set<string>();
@@ -2101,16 +2349,27 @@ function saveUnseen() {
 function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
 function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
+  // A popover anchored to the chat scope must not outlive a chat switch.
+  closePopover();
   if (!preserveDialogs) { dialogs.clear(); dialogSlot.replaceChildren(); visibleDialogId = null; }
   queue = { steering: [], followUp: [] }; renderQueue();
+  lastUsage = null; renderCtxCircle();
   noticesEl.replaceChildren(); attachError.classList.add("hidden");
   extStatus = ""; streamActivity = "thinking"; streamActivityTool = ""; resetView();
 }
 function applyState(st: Record<string, unknown>) {
-  cwd = String(st.cwd ?? cwd); activePath = typeof st.sessionFile === "string" ? st.sessionFile : null;
+  // Never adopt an empty cwd/session: the first state read at boot carries the
+  // still-unknown "" cwd, and accepting it empties the project list (chats
+  // vanish from the sidebar). The real backend resolves this itself, so a
+  // preview/older backend must not be able to.
+  const stCwd = typeof st.cwd === "string" ? st.cwd.trim() : "";
+  if (stCwd) cwd = stCwd;
+  const stFile = typeof st.sessionFile === "string" ? st.sessionFile.trim() : "";
+  activePath = stFile || null;
   cwdLabel.textContent = cwd.split("/").filter(Boolean).pop() ?? cwd; cwdBtn.title = cwd;
   activeName = String(st.sessionName ?? "");
   chatTitle.textContent = activeName || deriveTitle() || "New chat";
+  renderBranch();
   const level = String(st.thinkingLevel ?? thinkingSelect.value);
   if ([...thinkingSelect.options].some(o => o.value === level)) thinkingSelect.value = level;
   setBusy(st.isStreaming === true); renderProjects();
@@ -2125,7 +2384,28 @@ async function refreshState() {
 function deriveTitle(): string {
   const firstUser = messages.find((m) => m.role === "user");
   if (!firstUser) return "";
-  return msgText(firstUser).slice(0, 48);
+  return msgText(firstUser).replace(/\s+/g, " ").trim().slice(0, 48);
+}
+// Auto-rename once per session from the first user message (idea 3).
+// Local heuristic only — no model round-trip, zero cost/latency.
+const autoNamed = new Set<string>();
+async function maybeAutoRename() {
+  if (!activePath || activeName || autoNamed.has(activePath) || booting || bootError) return;
+  const name = deriveTitle();
+  if (!name) return;
+  autoNamed.add(activePath);
+  while (autoNamed.size > 200) {
+    const first = autoNamed.values().next().value as string | undefined;
+    if (first === undefined || first === activePath) break;
+    autoNamed.delete(first);
+  }
+  try {
+    await invokeScoped("pi_set_name", { name });
+    await refreshState();
+    await refreshSessions();
+  } catch {
+    autoNamed.delete(activePath ?? "");
+  }
 }
 
 function reconcileSend() {
@@ -2152,6 +2432,7 @@ async function refreshSessions() {
     const res = await invokeScoped<{sessions: SessionInfo[]}>("pi_list_sessions");
     if (gen !== bootGen) return;
     sessionsErrShown = false; sessions = res.sessions ?? [];
+    if (adoptedUnlisted && sessions.some((s) => `${cwd}:${s.path}` === adoptedUnlisted)) adoptedUnlisted = null;
     projectChats.set(cwd, sessions);
     renderProjects();
   } catch (e) {
@@ -2202,15 +2483,178 @@ async function refreshModels() {
   }
 }
 
+// Last usage snapshot for the header context circle + popup (idea 1).
+interface UsageSnap {
+  tokens?: { input: number; output: number; total: number };
+  cost?: number;
+  contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
+}
+let lastUsage: UsageSnap | null = null;
+// The context circle lives in the chat context bar (same line as project +
+// group, flush right). One persistent node re-appended on every bar render.
+const ctxCircle = document.createElement("button");
+ctxCircle.id = "ctx-circle";
+ctxCircle.type = "button";
+ctxCircle.className = "ctx-circle";
+ctxCircle.title = "Context usage";
+ctxCircle.setAttribute("aria-label", "Context usage");
+ctxCircle.setAttribute("aria-haspopup", "dialog");
+ctxCircle.setAttribute("aria-expanded", "false");
+ctxCircle.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><circle class="ring-bg" cx="12" cy="12" r="9"/><circle id="ctx-ring" class="ring-fg" cx="12" cy="12" r="9"/></svg>`;
+const ctxRing = ctxCircle.querySelector("#ctx-ring") as SVGCircleElement;
+const RING_C = 2 * Math.PI * 9;
+function renderCtxCircle() {
+  const pct = lastUsage?.contextUsage?.percent ?? null;
+  ctxRing.setAttribute(
+    "stroke-dasharray",
+    pct == null ? `0 ${RING_C.toFixed(1)}` : `${((pct / 100) * RING_C).toFixed(1)} ${RING_C.toFixed(1)}`
+  );
+  ctxCircle.classList.toggle("hot", pct != null && pct >= 80);
+  ctxCircle.setAttribute(
+    "aria-label",
+    pct == null ? "Context usage unavailable" : `Context ${pct}% full. Activate for details.`
+  );
+}
+// Popover primitive: floating surface above its trigger, bottom-right flush
+// with the trigger's right edge and a few pixels above it. Toggle on the
+// trigger, Esc or outside click to dismiss, focus restored on close.
+let popoverEl: HTMLElement | null = null;
+let popoverOutside: ((e: MouseEvent) => void) | null = null;
+function closePopover() {
+  popoverEl?.remove();
+  popoverEl = null;
+  ctxCircle.setAttribute("aria-expanded", "false");
+  if (popoverOutside) {
+    document.removeEventListener("mousedown", popoverOutside);
+    popoverOutside = null;
+  }
+}
+function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () => void) => void) {
+  closePopover();
+  const box = document.createElement("div");
+  box.className = "popover";
+  box.setAttribute("role", "dialog");
+  // Focusable so Esc works and Tab reaches the actions, but focusing the
+  // surface itself keeps buttons from opening with a focus ring.
+  box.tabIndex = -1;
+  box.style.outline = "none";
+  build(box, closePopover);
+  document.body.appendChild(box);
+  const r = anchor.getBoundingClientRect();
+  const gap = 6, pad = 8;
+  box.style.width = `${Math.min(300, window.innerWidth - pad * 2)}px`;
+  box.style.right = `${Math.max(pad, window.innerWidth - r.right)}px`;
+  box.style.bottom = `${window.innerHeight - r.top + gap}px`;
+  // Keep it on screen: nudge left, and flip below when there is no room above.
+  if (box.getBoundingClientRect().left < pad) {
+    box.style.right = "auto";
+    box.style.left = `${pad}px`;
+  }
+  if (box.getBoundingClientRect().top < pad) {
+    box.style.bottom = "auto";
+    box.style.top = `${r.bottom + gap}px`;
+  }
+  anchor.setAttribute("aria-expanded", "true");
+  popoverEl = box;
+  popoverOutside = (e: MouseEvent) => {
+    if (!box.contains(e.target as Node) && !anchor.contains(e.target as Node)) closePopover();
+  };
+  document.addEventListener("mousedown", popoverOutside);
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      closePopover();
+      anchor.focus();
+    }
+  });
+  box.focus();
+}
+function fmtCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+function openContextUsage() {
+  const u = lastUsage;
+  openPopover(ctxCircle, (box, close) => {
+    const pct = u?.contextUsage?.percent ?? null;
+    const win = u?.contextUsage?.contextWindow ?? null;
+    const h = document.createElement("h3");
+    h.textContent = "Context usage";
+    box.appendChild(h);
+
+    // One headline figure, one bar. The 80% marker is the compaction point.
+    const head = document.createElement("div");
+    head.className = "ctx-head";
+    const big = document.createElement("span");
+    big.className = "ctx-big" + (pct != null && pct >= 80 ? " hot" : "");
+    big.textContent = pct != null ? `${pct}%` : "—";
+    const sub = document.createElement("span");
+    sub.className = "ctx-sub";
+    sub.textContent = win != null ? `of ${fmtCount(win)} window` : "no window reported";
+    head.append(big, sub);
+    box.appendChild(head);
+
+    if (pct != null) {
+      const bar = document.createElement("div");
+      bar.className = "ctx-bar-usage" + (pct >= 80 ? " hot" : "");
+      bar.title = "Progress vs the 80% compaction point";
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      fill.style.width = `${Math.min(100, pct)}%`;
+      const tick = document.createElement("div");
+      tick.className = "tick";
+      tick.title = "Compact around 80%";
+      bar.append(fill, tick);
+      box.appendChild(bar);
+    }
+
+    // Quiet label/value rows — no nested boxes inside a box.
+    const rows: [string, string][] = [
+      ["Context", u?.contextUsage?.tokens != null ? `${fmtCount(u.contextUsage.tokens)} tok` : "—"],
+      ["Input", u?.tokens ? `${fmtCount(u.tokens.input ?? 0)} tok` : "—"],
+      ["Output", u?.tokens ? `${fmtCount(u.tokens.output ?? 0)} tok` : "—"],
+      ["Cost", typeof u?.cost === "number" ? `$${u.cost.toFixed(4)}` : "—"],
+    ];
+    const list = document.createElement("dl");
+    list.className = "ctx-rows";
+    for (const [k, v] of rows) {
+      const dt = document.createElement("dt");
+      dt.textContent = k;
+      const dd = document.createElement("dd");
+      dd.textContent = v;
+      list.append(dt, dd);
+    }
+    box.appendChild(list);
+
+    const note = document.createElement("p");
+    note.className = "ctx-note";
+    note.textContent = pct == null
+      ? "No usage reported for this chat yet."
+      : pct >= 80 ? "Past the compaction point." : "Compacts around 80%.";
+    box.appendChild(note);
+
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const compact = document.createElement("button");
+    compact.type = "button";
+    compact.textContent = "Compact now";
+    compact.onclick = () => { close(); void doCompact(); };
+    row.appendChild(compact);
+    box.appendChild(row);
+  });
+}
+ctxCircle.onclick = () => {
+  if (popoverEl) closePopover();
+  else openContextUsage();
+};
 async function refreshStats() {
   const gen = bootGen;
   try {
-    const s = (await invokeScoped("pi_get_stats")) as {
-      tokens?: { input: number; output: number; total: number };
-      cost?: number;
-      contextUsage?: { percent: number | null; tokens: number | null; contextWindow?: number };
-    };
+    const s = (await invokeScoped("pi_get_stats")) as UsageSnap;
     if (gen !== bootGen) return;
+    lastUsage = s;
+    renderCtxCircle();
     const parts: string[] = [];
     if (s.tokens) parts.push(`${((s.tokens.total ?? 0) / 1000).toFixed(1)}k tok`);
     if (typeof s.cost === "number") parts.push(`$${s.cost.toFixed(4)}`);
@@ -2287,7 +2731,7 @@ function checkWatchdog() {
   disarmWatchdog();
 }
 async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
-  const owner = sessKey(), gen = bootGen, id = newClientId(), startIndex = messages.length;
+  let owner = sessKey(); const gen = bootGen, id = newClientId(), startIndex = messages.length;
   sendInFlight = id; armWatchdog();
   if (kind === "prompt") { pendingSend = { ...d, id, owner, index: messages.length }; setBusy(true); renderSettled(); }
   updateSendState();
@@ -2301,6 +2745,19 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
       try { st = await invokeScoped<Record<string, unknown>>("pi_get_state"); }
       catch { return; } // Acceptance already succeeded; never offer a duplicate send.
       if (gen !== bootGen) return;
+      // First message on a chat with no session file yet: adopt the file pi
+      // just created so the row selects, events tag, and the sidebar lists
+      // it right away (idea 5). Ownership moves with the key (R2-F1).
+      const sf = typeof st.sessionFile === "string" ? st.sessionFile : null;
+      if (sf && !activePath) {
+        activePath = sf; owner = sessKey();
+        if (typeof st.sessionName === "string") activeName = st.sessionName;
+        if (pendingSend) pendingSend.owner = owner;
+        await refreshSessions();
+        adoptedUnlisted = sessions.some((s) => s.path === sf) ? null : `${cwd}:${sf}`;
+        chatTitle.textContent = activeName || deriveTitle() || "New chat";
+        renderProjects();
+      }
       if (!st.isStreaming && pendingSend?.id === id) { pendingSend = null; setBusy(false); await refreshMessages(); }
     }
   } catch (e) {
@@ -2430,6 +2887,7 @@ async function openSession(project: string, path: string | null) {
     clearRunScope(true); restoreDraft(); updateSkillPop();
     restoreQueueBar();
     await refreshMessages(); await refreshSessions(); await refreshModels(); await refreshCommands(); await refreshStats();
+    void refreshBranch();
     expandedProjects.add(project); saveExpanded();
     await refreshAllProjects();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
@@ -2704,8 +3162,11 @@ async function handleEvent(p: PiEvent) {
   }
   if (t === "extension_ui_request") { showExtensionDialog(p); return; }
   // Route by owning chat: untagged events (preview fixtures) belong here.
+  // While the visible chat has no session file yet, same-cwd tagged events
+  // are also this view's (pre-adopt window, idea 5 / R2-F1).
   const key = eventRowKey(p);
-  const isVis = key === null || key === visibleKey();
+  const preAdopt = activePath === null && cwd !== "" && key !== null && key.startsWith(`${cwd}:`);
+  const isVis = key === null || key === visibleKey() || preAdopt;
   if (isVis && (t === "agent_start" || t === "agent_settled" || t.startsWith("message_") || t.startsWith("tool_execution_"))) pokeProgress();
   if (t === "queue_update") {
     const lists = { steering: (p.steering as string[]) ?? [], followUp: (p.followUp as string[]) ?? [] };
@@ -2747,6 +3208,12 @@ async function handleEvent(p: PiEvent) {
     setBusy(false); pendingSend = null; renderSettled();
     // Keep live content visible while authoritative history is fetched.
     await refreshMessages(); await refreshAllProjects(); await refreshStats();
+    // One-shot backup: the first chat's row may still be unlisted (idea 5).
+    if (adoptedUnlisted && activePath && adoptedUnlisted === `${cwd}:${activePath}`) {
+      adoptedUnlisted = null;
+      await refreshSessions();
+    }
+    void maybeAutoRename();
     try { await refreshState(); } catch (e) { notify({text: `Couldn't refresh session: ${String(e)}`, kind: "error"}); }
   }
   if (t === "response" && p.success === false) notify({ text: `pi error: ${String(p.error ?? "Request failed")}`, kind: "error", sticky: true });
@@ -3164,6 +3631,7 @@ async function boot(_respawn = false): Promise<void> {
       restoreQueueBar();
       booting = false; restoreDraft(); updateSkillPop();
       await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshCommands(); await refreshStats();
+      void refreshBranch();
       if (gen !== bootGen) return;
       hideConnError(); renderSettled(); inputEl.focus();
     } catch (e) {

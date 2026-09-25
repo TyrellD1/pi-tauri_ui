@@ -1,0 +1,54 @@
+The plan covers ideas 1–7 and leaves idea 8 out. It is sound enough to implement after a short revision. Six material gaps should be written into the plan first. None of them break the hard rules (no protocol change, no new dependencies, no polling).
+
+## 1. Target and coverage
+
+Reviewed `docs/batch2-plan.md` (v1, as read). I could not recompute sha256 `b8c04b97…` in this mode.
+
+Checked against:
+
+- `src/main.ts`: rename modal, chat menu, stats, send, `agent_settled`, markdown render, groups
+- `src/logic.ts`: fence rendering, output truncation, activity labels
+- `src-tauri/src/main.rs`: `ensure`, `pi_new_chat`, `pi_set_name`, `pi_get_stats`, `pi_list_sessions`, `parse_session_preview`, command list
+- `index.html` and `src/style.css`: composer footer, existing spin animation
+- Opener plugin already in `src-tauri/Cargo.toml` and `src-tauri/capabilities/default.json`
+
+Coverage gaps: I did not run `pi` RPC, `npm test`, `cargo test`, or a Tauri build. D1–D3 are still live checks. No lead test log exists yet.
+
+## 2. Findings
+
+**F1. material. Plan §7.** The Rust command cannot assign groups. Groups live in the webview key `pi-chat-groups` (`loadGroups` / `saveGroups` in `src/main.ts`). `pi_coded_chat { group? }` and the Rust test “unknown group created” have no Rust store to write. A script outside the app also cannot call a Tauri command, and §7 defers the pi extension and rejects a deep link, so nothing in this batch actually creates a chat. Remedy: keep `group` on the frontend only, after `{ path }` returns. State that this batch’s caller is an in-app call (the external script waits for the extension). Make the Rust test a pure prefix check plus “no `firstMessage` means no prompt,” with no live `pi` process.
+
+**F2. material. Plan §7 and D1.** The `code` badge reads a `[code]` name, but the sidebar name comes from `parse_session_preview`, which only reads `type == session_info`. D1 already says real session files may not have that record. The D1 fallback covers auto-rename only. If the name is not in the file, the badge never shows in the list, including after restart. Remedy: if D1 finds no name record the parser can read, store coded paths in the same localStorage as groups and badge from that set. If D1 finds a name record of a different shape, teach the parser that shape before relying on the prefix.
+
+**F3. material. Plan §5.** A once-per-key refresh on prompt accept can run before the new session file is visible. `submit()` already calls `pi_get_state` and then ignores `sessionFile`, so `activePath` stays empty. Events are then tagged with the new file while the view key is still `cwdkey:…`, and the row is not selected (`s.path === activePath` in `chatButton`). `agent_settled` refreshes `pi_all_projects` (scan of `~/.pi/agent/sessions`), not `pi_list_sessions` (the live process’s own session directory). Switching chats works because `openSession` calls `refreshSessions`. If the early refresh misses and the guard blocks a later one, the row still waits until a switch. Remedy: on the accept-time state read, adopt `sessionFile` when the view has none, then `refreshSessions`. Set the once-guard only after that path is in the list. One later `refreshSessions` on settle if it was missing. `newChatInProject` already refreshes inside `openSession`, so the extra refresh there can go.
+
+**F4. material. Plan §3.** Routing a row rename through `targetScope` retargets every scoped command. `targetScope` is the global override `visibleScope()` uses for all of `invokeScoped` (`src/main.ts` around the send/status section), including stats and prompts, for as long as it is set. Remedy: call `pi_set_name` with that row’s `cwd` and session path as arguments. Leave `targetScope` for navigation only.
+
+**F5. material. Plan §4.** Collapsing JSON by shortening the `<code>` text breaks Copy. The existing click handler copies `pre.textContent` (`messagesInner` click listener in `src/main.ts`). Tool output uses a different one-way “Show full output” control and does not share that button. Remedy: pretty-print in `renderMarkdown`, keep the full text for Copy, and only hide the extra lines in the visible block. Add the regression cases on the full text and on the 50-line cutoff.
+
+**F6. suggestion. Plan §1.** “Last compaction” has no source. Session details and `refreshStats` read `tokens`, `cost`, and `contextUsage`. D3 does not mention a compaction field. The 80% tick matches today’s warn threshold in `refreshStats`, which is the chosen call. Remedy: omit last compaction unless D3 finds a field.
+
+**F7. suggestion. Plan §1 and §6.** Both want the right side of `composer-foot`. The circle is specified as header or footer. Remedy: put the circle in the header and leave the footer as spinner, status, and branch. Reuse `.run-spin`. The reduced-motion rule targets `.run-spin` only. Rewrite the idle acceptance line so “Ready” has one place.
+
+**F8. suggestion. Plan §2 and §6.** `tauri-plugin-opener` is already initialized with `opener:default`. A custom allowlist command is still the right boundary. It can open through that plugin instead of hard-coding `/usr/bin/open` plus an `xdg-open` cfg. Canonicalize `cwd` as well as the file before the “inside cwd” check. For the branch, `Command::new("git")` uses the app PATH. Finder launches use a short PATH; `resolve_pi` already works around that. `null` on failure is fine. Also try `/usr/bin/git` and `/opt/homebrew/bin/git`.
+
+**F9. suggestion. Plan §3.** `deriveTitle` is a 48-character slice with no cleanup. A first message with a newline becomes the stored name. Remedy: collapse whitespace, then slice.
+
+## 3. Checks
+
+| Check | Outcome |
+| --- | --- |
+| Idea 8 excluded | Stated in the title, exclusion line, and risks. No viewer work. |
+| No new protocol verbs, deps, or timers | Plan uses `set_session_name`, `prompt`, `get_session_stats`, `open`, and `git` on existing events. |
+| Rename modal already exists | Header menu calls `openRename`. §3 adds menu and double-click. Matches the idea. |
+| `session_info` vs real header | Parser reads `session_info` only (`main.rs`). D1 matches that gap. |
+| Groups storage | `pi-chat-groups` in localStorage. |
+| Opener plugin | Present and permitted. |
+| Spin and reduced motion | `.run-spin` and the media query already exist. |
+| Tests, RPC, build, hash | Not run. |
+
+## 4. Open questions and verdict
+
+D1–D3 stay open on purpose. I could not confirm whether the session file exists at the moment prompt accept returns. That is the uncertainty under F3. Item 6’s right-hand cluster stays a non-blocking interpretation, as the plan says.
+
+**Verdict: revise the plan, then implement.** Fold in F1–F5. F6–F9 are optional. Limits: no live `pi` run and no build in this pass.

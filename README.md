@@ -37,7 +37,9 @@ npm run tauri build
 
 ## Sessions
 
-Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. A brand-new chat adopts its session file on the first accepted send, so its row appears without switching away. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+
+Chats made by code carry a `[code]` name prefix (plus a local `code` badge that survives restarts) and can be filed into groups on creation: right-click empty sidebar → New coded chat, or call the `pi_coded_chat` Tauri command (`{ cwd, name, first_message? }`) from a future extension.
 
 ## Shortcuts & send contract
 
@@ -47,7 +49,7 @@ Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` proc
 - Secondary composer action queues the draft as `follow_up` (sent after this turn)
 - `⌘N` new chat · `⌘K` search · `⌘,` settings
 
-Header holds the title, a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. Model + thinking controls live beside the composer.
+Header holds the title (double-click to rename), a conversation menu (Session details, Compact, Export, Rename, Show tool activity, Quiet mode), and the sun/moon toggle. The context-usage circle sits at the right end of the project/group strip above the composer (click for a popover with tokens, window, and the 80% compaction marker). Model + thinking controls live beside the composer. The composer foot shows a spinner while streaming plus the git branch (`⎇ main`, hidden outside repos). Right-click any chat for Open / Rename / group actions; right-click empty sidebar space for New coded chat. `.md` / `.html` paths in chat render as buttons that open via the OS opener (allowlisted, project-scoped). ```json fences pretty-print and collapse past 50 lines without touching Copy.
 
 ## Verify UI changes
 
@@ -66,4 +68,6 @@ npm run dev -- --port 1422 --host 127.0.0.1
 
 Open `http://127.0.0.1:1422/?dev=1`. Expand **Preview scenarios** for populated, empty, streaming, permission, and rejected-send states. **Run UI regression** exercises the real composer, event handler, history renderer, drafts, permission responses, and navigation. Add `&listenerFailure=1` to verify startup retry. These controls and mock messages are excluded from production builds; no model calls occur in preview mode.
 
-The small Markdown renderer supports headings, fenced code, lists, quotes, links, and tables. It deliberately escapes raw HTML. Tool output starts at 200 lines with full output and copying on demand. No new runtime dependencies or polling were added.
+The small Markdown renderer supports headings, fenced code, lists, quotes, links, and tables. It deliberately escapes raw HTML. Tool output starts at 200 lines with full output and copying on demand. No new runtime dependencies or polling were added. `.md` / `.html` paths in chat render as clickable buttons (inline code included, fenced code and real links excluded).
+
+**Run UI regression with a clean profile.** The suite reads real persisted state (drafts, groups, expanded projects, unseen dots), so repeated runs in one browser profile drift and report false failures. Click **Reset preview state** in the dev panel first (or clear site data) for a deterministic run; a clean profile passes all 46 checks.

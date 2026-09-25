@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <script>
+    (() => {
+      let saved;
+      try { saved = localStorage.getItem('html-theme'); } catch {}
+      const preference = saved === 'light' || saved === 'dark' ? saved : 'system';
+      document.documentElement.dataset.themePreference = preference;
+      document.documentElement.dataset.theme = preference === 'system'
+        ? matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light' : preference;
+    })();
+  </script>
+  <title>PR #2 review checklist — context, paths, rename, json, coded chats</title>
+  <meta name="description" content="Human verification checklist for pi-tauri_ui PR #2: context circle, clickable paths, rename, json blocks, first-chat listing, progress plus branch, coded chats.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23222222'/%3E%3Cpath d='M12 10l-6 6 6 6m8-12l6 6-6 6' fill='none' stroke='white' stroke-width='2'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --page: #ffffff; --ink: #242424; --muted: #686868; --quiet: #767676;
+      --line: #e4e4e4; --surface: #f7f7f7; --surface-deep: #ededed; --strong: #2c2c2c;
+      color-scheme: light;
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    :root[data-theme="dark"] {
+      --page: #171717; --ink: #e6e6e6; --muted: #adadad; --quiet: #999999;
+      --line: #353535; --surface: #202020; --surface-deep: #2c2c2c; --strong: #d9d9d9;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--page); color: var(--ink); font-family: var(--font); font-size: 17px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
+    .page { width: min(1080px, calc(100% - 96px)); margin: 0 auto; }
+    .masthead { padding: 29px 0 24px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+    .wordmark { font-family: var(--mono); font-size: 14px; font-weight: 600; }
+    .masthead-actions { display: flex; align-items: center; gap: 24px; }
+    .edition { color: var(--muted); font-size: 13px; }
+    .theme-toggle { display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
+    .theme-toggle:hover { color: var(--ink); background: var(--surface); }
+    .theme-toggle svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+    .theme-toggle .sun { display: none; }
+    [data-theme="dark"] .theme-toggle .sun { display: block; }
+    [data-theme="dark"] .theme-toggle .moon { display: none; }
+    .hero { padding: 58px 0 38px; }
+    .eyebrow { font-size: 12px; font-family: var(--mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); margin: 0 0 16px; }
+    h1 { font-size: clamp(32px, 4.5vw, 48px); line-height: 1.13; font-weight: 600; letter-spacing: -.045em; max-width: 800px; margin: 0; }
+    .lede { max-width: 720px; font-size: 20px; line-height: 1.6; color: var(--muted); margin-top: 22px; }
+    .progress { margin-top: 26px; max-width: 690px; }
+    .progress-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 14px; color: var(--muted); margin-bottom: 8px; }
+    .progress-row strong { color: var(--ink); }
+    .bar { height: 8px; border-radius: 4px; background: var(--surface-deep); overflow: hidden; }
+    .bar > div { height: 100%; width: 0; background: var(--strong); border-radius: 4px; transition: width .2s; }
+    .reset { margin-top: 12px; font-size: 13px; color: var(--quiet); background: none; border: none; cursor: pointer; padding: 0; font-family: var(--font); }
+    .reset:hover { color: var(--ink); text-decoration: underline; }
+    ticket { display: block; padding-top: 68px; }
+    .ticket-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 6px; }
+    .ticket-num { font-family: var(--mono); font-size: 12px; color: var(--quiet); }
+    .ticket-head h2 { font-size: 27px; font-weight: 600; letter-spacing: -.03em; margin: 0; flex: 1; }
+    .ticket-count { font-family: var(--mono); font-size: 12px; color: var(--quiet); white-space: nowrap; }
+    .prework { max-width: 690px; color: var(--muted); font-size: 15px; margin: 8px 0 4px; }
+    .prework code { font-family: var(--mono); font-size: .85em; background: var(--surface-deep); padding: 2px 6px; border-radius: 4px; }
+    checklist-item { display: flex; gap: 14px; align-items: flex-start; padding: 13px 4px; border-bottom: 1px solid var(--line); cursor: pointer; max-width: 760px; }
+    checklist-item:first-of-type { border-top: 1px solid var(--line); margin-top: 14px; }
+    checklist-item:hover { background: var(--surface); }
+    checklist-item input { margin-top: 7px; width: 16px; height: 16px; accent-color: var(--strong); flex-shrink: 0; cursor: pointer; }
+    checklist-item .text { flex: 1; font-size: 15.5px; line-height: 1.6; }
+    checklist-item.done .text { color: var(--quiet); text-decoration: line-through; text-decoration-thickness: 1px; }
+    checklist-item code { font-family: var(--mono); font-size: .82em; background: var(--surface-deep); padding: 2px 6px; border-radius: 4px; }
+    footer { border-top: 1px solid var(--line); margin-top: 68px; padding: 23px 0 32px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 760px) { .page { width: calc(100% - 40px); } body { font-size: 16px; } }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="masthead">
+      <div class="wordmark">pi-tauri_ui · PR #2</div>
+      <div class="masthead-actions">
+        <div class="edition">Review checklist</div>
+        <button class="theme-toggle" type="button" aria-label="Toggle light and dark theme" title="Toggle light and dark theme">
+          <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg>
+          <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="hero">
+      <p class="eyebrow">Branch feat/batch2-ideas-1-7</p>
+      <h1>Context, paths, rename, JSON &amp; coded chats</h1>
+      <p class="lede">Human pass over what automation can't judge: ring legibility, click targets, wording, and cross-restart persistence. Work top to bottom; each box is one verifiable behavior. Automation already green: <code>npm run build</code>, <code>npm test</code> (37+10), <code>cargo test</code> (8), <code>tauri build</code> (2 bundles).</p>
+      <div class="progress">
+        <div class="progress-row"><span>Overall</span><strong id="total-count">0 / 0</strong></div>
+        <div class="bar"><div id="total-bar"></div></div>
+        <button class="reset" id="reset" type="button">Reset all checkboxes</button>
+      </div>
+    </div>
+    <main>
+
+      <ticket data-name="ctx-circle">
+        <div class="ticket-head"><span class="ticket-num">01</span><h2>Context circle + popup</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: open the app, open any chat with some history.</p>
+        <checklist-item>The header shows a ring + <code>NN%</code> left of the <code>···</code> button; the number matches Session details → context.</checklist-item>
+        <checklist-item>Clicking the circle opens “Context usage”: input/output/context tokens, window size, a bar with the 80% tick, and a Compact now button.</checklist-item>
+        <checklist-item><code>Esc</code>, backdrop click, and Done all close the popup; Compact now closes it and compacts.</checklist-item>
+        <checklist-item>A fresh chat with no stats shows <code>–</code>; switching chats never shows the previous chat's number.</checklist-item>
+      </ticket>
+
+      <ticket data-name="paths">
+        <div class="ticket-head"><span class="ticket-num">02</span><h2>Clickable .md / .html paths</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: paste this to pi verbatim — <code>print these two literal paths and nothing else: docs/pr-1-review-checklist.html and /Users/tydowner/workspace_a/projects/pi-tauri_ui/docs/batch2-plan.md</code>. Both files exist.</p>
+        <checklist-item>Path tokens render dotted-underlined; hovering darkens them; they never shift surrounding line layout.</checklist-item>
+        <checklist-item>A path pi wraps in backticks (inline code) is clickable too — it keeps the code background and gets a dotted bottom border.</checklist-item>
+        <checklist-item>Clicking a relative path opens that file in its default app; an absolute in-project path does the same.</checklist-item>
+        <checklist-item>Real links stay links, and paths inside a fenced code block stay plain text.</checklist-item>
+        <checklist-item>Clicking a missing file (or a <code>.sh</code> lookalike) shows an error toast and nothing else happens.</checklist-item>
+      </ticket>
+
+      <ticket data-name="rename">
+        <div class="ticket-head"><span class="ticket-num">03</span><h2>Rename + auto-rename</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: have at least two chats; start one brand-new chat and send a first message with a long rambling sentence.</p>
+        <checklist-item>Right-click a chat → Rename chat opens the modal prefilled with its current name; saving updates the sidebar row.</checklist-item>
+        <checklist-item>Double-clicking the chat title opens the same modal (tooltip says so).</checklist-item>
+        <checklist-item>Right-clicking a running chat → Rename warns to wait for the turn instead of renaming mid-stream.</checklist-item>
+        <checklist-item>The brand-new chat names itself after its first settled turn (≈48 chars, single line); a manual rename is never overwritten, and later turns don't rename again.</checklist-item>
+      </ticket>
+
+      <ticket data-name="json">
+        <div class="ticket-head"><span class="ticket-num">04</span><h2>JSON blocks</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: have pi emit a compact <code>```json</code> object, a broken one, and one over 50 lines.</p>
+        <checklist-item>Valid JSON renders pretty-printed (2-space) under its <code>json</code> label with the usual Copy button.</checklist-item>
+        <checklist-item>Invalid JSON renders exactly as written — no error, no mangling.</checklist-item>
+        <checklist-item>The 50+ line block starts collapsed with Show more / Show less; Copy still copies the full text.</checklist-item>
+      </ticket>
+
+      <ticket data-name="first-chat">
+        <div class="ticket-head"><span class="ticket-num">05</span><h2>First chat lists immediately</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: press <code>⌘N</code> for a fresh chat in the current project.</p>
+        <checklist-item>Sending the first message makes the row appear in the sidebar while the turn runs — no need to switch away.</checklist-item>
+        <checklist-item>The new row is selected; streamed deltas land in it (no empty view, no duplicate optimistic bubble).</checklist-item>
+        <checklist-item>After the turn settles there is exactly one row for the chat, with the right preview and timestamp.</checklist-item>
+      </ticket>
+
+      <ticket data-name="progress-branch">
+        <div class="ticket-head"><span class="ticket-num">06</span><h2>Progress spinner + branch</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: open a chat in a git repo and one in a non-repo folder; start a slow turn.</p>
+        <checklist-item>While streaming, a small spinner sits left of the status text; idle hides it and shows exactly one “Ready”.</checklist-item>
+        <checklist-item>The footer's right edge shows <code>⎇ branch-name</code> in the repo and nothing in the non-repo folder; switching projects updates it.</checklist-item>
+        <checklist-item>With <code>prefers-reduced-motion</code> on, the spinner still rotates (deliberate exception — it is the only progress signal).</checklist-item>
+        <checklist-item>Quit and reopen with chats in several projects: the sidebar shows your chats immediately; no project renders as an empty header.</checklist-item>
+      </ticket>
+
+      <ticket data-name="coded">
+        <div class="ticket-head"><span class="ticket-num">07</span><h2>Coded chats</h2><span class="ticket-count" data-count></span></div>
+        <p class="prework">Pre-work: right-click an empty patch of the sidebar (not a row).</p>
+        <checklist-item>“New coded chat…” offers name, optional group, optional first message; creating opens the chat at once.</checklist-item>
+        <checklist-item>The row carries a small <code>code</code> badge and sits in the named group (created if missing).</checklist-item>
+        <checklist-item>Quit and reopen: badge and group membership are both still there.</checklist-item>
+        <checklist-item><code>node scripts/new-coded-chat.mjs --name demo --group agents</code> prints the Tauri payload instead of creating anything.</checklist-item>
+      </ticket>
+
+    </main>
+    <footer><span>pi-tauri_ui · PR #2 human checklist</span><span>Progress saves in this browser only.</span></footer>
+  </div>
+  <script>
+    const themeButton = document.querySelector('.theme-toggle');
+    const systemTheme = matchMedia('(prefers-color-scheme: dark)');
+    function setTheme(theme) {
+      document.documentElement.dataset.theme = theme;
+      const label = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+      themeButton.setAttribute('aria-label', label);
+      themeButton.title = label;
+    }
+    themeButton.addEventListener('click', () => {
+      const theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.themePreference = theme;
+      setTheme(theme);
+      try { localStorage.setItem('html-theme', theme); } catch {}
+    });
+    systemTheme.addEventListener('change', e => {
+      if (document.documentElement.dataset.themePreference === 'system') setTheme(e.matches ? 'dark' : 'light');
+    });
+    setTheme(document.documentElement.dataset.theme);
+
+    const KEY = 'pr2-checklist';
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch {}
+    const tickets = [...document.querySelectorAll('ticket')];
+    const items = [];
+    tickets.forEach((t, ti) => {
+      [...t.querySelectorAll('checklist-item')].forEach((el, ii) => {
+        const id = t.dataset.name + ':' + ii;
+        const label = document.createElement('label');
+        label.style.cssText = 'display:flex;gap:14px;align-items:flex-start;width:100%;cursor:pointer;';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.checked = !!saved[id];
+        box.setAttribute('aria-label', 'Mark verified: ' + el.textContent.trim().slice(0, 80));
+        const span = document.createElement('span');
+        span.className = 'text';
+        span.innerHTML = el.innerHTML;
+        label.append(box, span);
+        el.textContent = '';
+        el.appendChild(label);
+        if (box.checked) el.classList.add('done');
+        box.addEventListener('change', () => {
+          el.classList.toggle('done', box.checked);
+          saved[id] = box.checked;
+          try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch {}
+          update();
+        });
+        items.push({ id, el });
+      });
+    });
+    function update() {
+      let done = 0;
+      tickets.forEach(t => {
+        const boxes = [...t.querySelectorAll('input[type=checkbox]')];
+        const n = boxes.filter(b => b.checked).length;
+        done += n;
+        t.querySelector('[data-count]').textContent = n + ' / ' + boxes.length;
+      });
+      document.getElementById('total-count').textContent = done + ' / ' + items.length;
+      document.getElementById('total-bar').style.width = (items.length ? (done / items.length * 100) : 0) + '%';
+    }
+    document.getElementById('reset').addEventListener('click', () => {
+      saved = {};
+      try { localStorage.removeItem(KEY); } catch {}
+      document.querySelectorAll('checklist-item input').forEach(b => { b.checked = false; b.closest('checklist-item').classList.remove('done'); });
+      update();
+    });
+    update();
+  </script>
+</body>
+</html>

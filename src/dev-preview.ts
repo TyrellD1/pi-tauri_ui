@@ -9,6 +9,7 @@ let nextId = 0, listenAttempts = 0;
 let rejectNext = false, holdSend: (() => void) | null = null, holdResponse: (() => void) | null = null;
 let failNavigation = false;
 let failResponse = false, calls: {cmd: string; args?: Record<string, unknown>}[] = [];
+let createdSessions: {path:string;id:string;name:string|null;preview:string;mtime:number;messageCount:number}[] = [];
 let queued: string[] = [];
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const clone = <T>(v: T): T => structuredClone(v);
@@ -17,6 +18,11 @@ function emit(p: Record<string, unknown>) {
   fixture.ingest(p);
   if (p.type === 'agent_start') running = true;
   if (p.type === 'agent_settled') running = false;
+  // The real backend tags every event with its owning cwd + session so the UI
+  // can route it to the right chat. Fixtures must do the same or per-chat
+  // caches (queue, run state) never populate and the routing path goes untested.
+  p.cwd = cwd;
+  p.session = path;
   listener?.({payload: clone(p)});
 }
 function populated(): Message[] {
@@ -24,12 +30,17 @@ function populated(): Message[] {
     {role:'user',content:'Can you simplify the chat interface and check the result?',timestamp:1},
     {role:'assistant',content:[{type:'thinking',thinking:'Start with hierarchy, then verify the interaction states.'},{type:'text',text:'## A quieter place to work\n\nThe conversation now leads. Tools sit in compact rows, and the controls you use most stay close to your message.\n\n- Clearer spacing and a consistent reading width\n- Model and thinking controls beside the composer\n- Errors with an obvious next step'}],timestamp:2},
     {role:'assistant',content:[{type:'toolCall',id:'preview-read',name:'read',arguments:{path:'src/main.ts'}},{type:'text',text:'The header only needs the chat title, conversation actions, and theme toggle.\n\n```ts\nconst actions = ["Session details", "Rename chat"];\n```\n\n| State | What you see |\n| --- | --- |\n| Ready | Message composer |\n| Running | Stop and follow-up controls |\n| Waiting | A clear permission request |'}],timestamp:3},
+    {role:'assistant',content:[{type:'text',text:'Two files worth a look: docs/batch2-plan.md (plain) and `/Users/tydowner/workspace_a/projects/pi-tauri_ui/docs/pr-1-review-checklist.html` (backticked, absolute). Links like [the docs](https://example.com/x.md) stay links.'}],timestamp:5},
     {role:'toolResult',toolCallId:'preview-read',toolName:'read',content:[{type:'text',text:Array.from({length:240},(_,i)=>`Line ${i+1}: workspace view`).join('\n')}],timestamp:4},
   ];
 }
 function resetData() { fixture.reset(scenario === 'Populated' ? populated() : []); running = false; queued = []; }
 function previewSessions() {
-  return Array.from({length:245},(_,i)=>({path:`/preview/chats/chat-${i}.jsonl`,id:String(i),name:i===0?'Refine the chat interface':null,preview:i===244?'Archived keyboard review':`Project conversation ${i+1}`,mtime:Date.now()-i*3600000,messageCount:10}));
+  const generated = Array.from({length:245},(_,i)=>({path:`/preview/chats/chat-${i}.jsonl`,id:String(i),name:i===0?'Refine the chat interface':null,preview:i===244?'Archived keyboard review':`Project conversation ${i+1}`,mtime:Date.now()-i*3600000,messageCount:10}));
+  // Chats created in this session must list too — the real backend does, and
+  // the sidebar expects the active chat to be present (queue/run-state checks
+  // navigate back to it by position).
+  return [...createdSessions, ...generated];
 }
 function user(message: string, images: unknown[] = []): Message {
   return {role:'user',content:[...(message ? [{type:'text',text:message}] : []), ...images.map(im=>({...(im as object),type:'image'}))],timestamp:Date.now()};
@@ -58,10 +69,14 @@ export function installPreview() {
         if(failNavigation) {failNavigation=false;return {success:false,error:'Preview session unavailable'};}
         // Scoped routing like the real pool: an explicit session wins, a new
         // folder presents its default, otherwise the current session holds.
+        // An empty/absent cwd means "unknown yet" — the real backend falls back
+        // to its own directory and reports that; mirror it instead of adopting
+        // "", which would empty the project list.
+        const reqCwd = typeof args?.cwd === 'string' ? args.cwd.trim() : '';
         const sp = args?.session;
         if(typeof sp === 'string' && sp) { path=sp; }
-        else if(sp === null && typeof args?.cwd === 'string' && args.cwd !== cwd) { cwd=String(args.cwd); path=`${cwd}/new.jsonl`; resetData(); }
-        else if(typeof args?.cwd === 'string' && args.cwd) { cwd=String(args.cwd); }
+        else if(sp === null && reqCwd && reqCwd !== cwd) { cwd=reqCwd; path=`${cwd}/new.jsonl`; resetData(); }
+        else if(reqCwd) { cwd=reqCwd; }
         return {cwd,sessionFile:path,sessionName:scenario === 'Populated'?'Refine the chat interface':'New chat',thinkingLevel:'xhigh',isStreaming:running,model:{provider:'opencode-go',id:'muse-spark-1.3-contributor'}};
       }
       if(cmd === 'pi_get_messages') return {messages:clone(fixture.messages)};
@@ -70,11 +85,22 @@ export function installPreview() {
       if(cmd === 'pi_get_models') return {models:[{provider:'opencode-go',id:'muse-spark-1.3-contributor'},{provider:'anthropic',id:'claude-sonnet-4'}],current:'opencode-go/muse-spark-1.3-contributor'};
       if(cmd === 'pi_get_commands') return {commands:[{name:'skill:image-gen',description:'Generate images from a prompt',source:'skill',location:'user'},{name:'skill:improve-prompt',description:'Refine a rough prompt',source:'skill',location:'project'}]};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
-      if(cmd === 'pi_new_chat') { path=`/preview/new-${++nextId}.jsonl`; resetData(); return {success:true,path}; }
+      if(cmd === 'pi_new_chat') {
+        path=`/preview/new-${++nextId}.jsonl`;
+        createdSessions.unshift({path,id:`new-${nextId}`,name:null,preview:'New chat',mtime:Date.now(),messageCount:0});
+        resetData(); return {success:true,path};
+      }
       if(cmd === 'pi_prompt' || cmd === 'pi_steer' || cmd === 'pi_follow_up') {
         if(rejectNext) { rejectNext=false; await new Promise<void>(r=>holdSend=r); holdSend=null; return {success:false,error:'Preview rejection'}; }
-        if(cmd === 'pi_prompt') accepted(String(args?.message ?? ''),(args?.images as unknown[]) ?? []);
-        else { queued.push(String(args?.message ?? 'Image')); emit({type:'queue_update',steering:[],followUp:queued}); }
+        const msg = String(args?.message ?? 'Image'), imgs = (args?.images as unknown[]) ?? [];
+        if(cmd === 'pi_prompt') accepted(msg, imgs);
+        else {
+          // Real pi echoes a steering message into the transcript immediately;
+          // follow-ups stay queued until the turn ends.
+          if(cmd === 'pi_steer') { const m = user(msg, imgs); emit({type:'message_start',message:m}); emit({type:'message_end',message:m}); }
+          else queued.push(msg);
+          emit({type:'queue_update',steering:[],followUp:queued});
+        }
         return {accepted:true,success:true};
       }
       if(cmd === 'pi_abort') { finish(); return {success:true}; }
@@ -84,6 +110,8 @@ export function installPreview() {
         return {ok:true};
       }
       if(cmd === 'pi_export') return {path:'/preview/export.html'};
+      if(cmd === 'pi_open_path') return {ok:true};
+      if(cmd === 'pi_git_branch') return {branch:'preview-branch'};
       return {success:true};
     }
   });
@@ -96,6 +124,10 @@ export function installPreview() {
   button('Load scenario',()=>void loadScenario(select.value));
   button('Next stream step',()=>streamStep());
   button('Release rejection',()=>holdSend?.());
+  // The suite reads real persisted state (drafts, groups, expanded, dots), so
+  // repeated runs in one profile drift and produce false failures. Reset first
+  // for a deterministic run.
+  button('Reset preview state',()=>{ for(const k of Object.keys(localStorage)) if(k.startsWith('pi-')) localStorage.removeItem(k); location.reload(); });
   const run=button('Run UI regression',()=>void runRegression());
   const result=document.createElement('pre'); result.id='dev-results';result.style.cssText='white-space:pre-wrap;font:11px/1.5 var(--font)';panel.append(result);
   document.body.append(panel);
@@ -133,6 +165,20 @@ export function installPreview() {
       check('settle preserves disclosure node and expansion',oldTool===$('messages-inner').querySelector('[data-tool="tool-ordered-tool"]') && oldTool.getAttribute('aria-expanded')==='true');
       const more=Array.from(oldTool.parentElement!.querySelectorAll('button')).find(b=>b.textContent?.startsWith('Show full output'))!;more.click();
       check('full output reachable',out.textContent?.includes('output 239')===true);
+      // Chat paths (idea 2): plain and backticked .md/.html linkify; clicking
+      // one calls the allowlisted opener with the visible cwd.
+      emit({type:'message_start',message:{role:'assistant',content:[{type:'text',text:'See docs/batch2-plan.md and `docs/pr-1-review-checklist.html` plus [a link](https://example.com/x.md).'}]}});
+      emit({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'See docs/batch2-plan.md and `docs/pr-1-review-checklist.html` plus [a link](https://example.com/x.md).'}]}});
+      await sleep(60);
+      const pathLinks=Array.from($('messages-inner').querySelectorAll<HTMLButtonElement>('.path-link'));
+      check('plain and backticked paths linkify, links do not',
+        pathLinks.length===2 && pathLinks[0].textContent==='docs/batch2-plan.md' && pathLinks[1].classList.contains('in-code'));
+      check('fenced paths stay plain',!$('messages-inner').querySelector('.codeblock .path-link'));
+      const beforeOpen=calls.filter(c=>c.cmd==='pi_open_path').length;
+      pathLinks[0].click(); await sleep(80);
+      const opened=[...calls].reverse().find(c=>c.cmd==='pi_open_path');
+      check('path click opens with explicit cwd',
+        calls.filter(c=>c.cmd==='pi_open_path').length===beforeOpen+1 && opened?.args?.path==='docs/batch2-plan.md' && typeof opened?.args?.cwd==='string');
       type('same message');$('btn-send').click();await sleep(50);finish();await sleep(70);type('same message');$('btn-send').click();await sleep(50);finish();await sleep(70);
       check('identical consecutive messages retained',Array.from($('messages-inner').querySelectorAll('.user-bubble')).filter(n=>n.textContent==='same message').length===2);
       emit({type:'extension_ui_request',method:'confirm',id:'a',title:'Permission A',message:'Allow this command?'});
@@ -205,7 +251,11 @@ export function installPreview() {
       const routed=calls.length;$('btn-settings').click();$<HTMLInputElement>('m-cwd').value='/projects/other';
       Array.from($('modal-root').querySelectorAll('button')).find(b=>b.textContent==='Save')!.click();await sleep(100);
       check('folder change needs no respawn',cwd==='/projects/other' && !calls.slice(routed).some(c=>['pi_spawn','pi_set_cwd','pi_new_session','pi_switch_session'].includes(c.cmd)));
-      check('session list stays bounded',$('chat-list').querySelectorAll('.chat-item').length===100);
+      // The cap is per project listing: the active project renders a 100-chat
+      // window, so the DOM stays bounded no matter how many sessions exist.
+      // (Groups may add their own rows, so scope this to the project section.)
+      const projBox=[...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd);
+      check('session list stays bounded',projBox?.querySelectorAll('.chat-item').length===100);
       typeSearch('Archived keyboard review');await sleep(200);check('search reaches chat beyond 200',$('chat-list').textContent!.includes('Archived keyboard review'));
       check('session changed away from source',path!==firstPath);
       type('draft through disconnect');const reconnectPath=path;emit({type:'process_disconnected'});await sleep();
