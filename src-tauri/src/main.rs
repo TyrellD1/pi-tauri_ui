@@ -25,6 +25,7 @@ use std::{
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -699,6 +700,84 @@ async fn pi_set_name(cwd: String, session: Option<String>, name: String, app: Ap
     Ok(r)
 }
 
+/// Validate a chat-clicked path: allowlisted extension, exists, inside `cwd`.
+/// Both sides are canonicalized so `../` escapes and symlinks can't leave.
+fn check_open_path(cwd: &str, raw: &str) -> Result<PathBuf, String> {
+    let lower = raw.to_lowercase();
+    if !(lower.ends_with(".md") || lower.ends_with(".html")) {
+        return Err("only .md and .html files open from chat".into());
+    }
+    if raw.contains("://") { return Err("remote URLs don't open from chat".into()); }
+    let base = PathBuf::from(cwd);
+    let joined = if PathBuf::from(raw).is_absolute() { PathBuf::from(raw) } else { base.join(raw) };
+    let canon_cwd = base.canonicalize().map_err(|_| format!("unknown project folder: {}", cwd))?;
+    let canon = joined.canonicalize().map_err(|_| format!("file not found: {}", raw))?;
+    if !canon.is_file() { return Err(format!("not a file: {}", raw)); }
+    if !canon.starts_with(&canon_cwd) { return Err("file is outside the project folder".into()); }
+    Ok(canon)
+}
+
+#[tauri::command]
+async fn pi_open_path(cwd: String, path: String, app: AppHandle) -> Result<Value, String> {
+    // Needs no pi process: a pure filesystem gate + the OS opener.
+    let canon = check_open_path(&cwd, &path)?;
+    app.opener()
+        .open_path(canon.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|e| format!("Couldn't open {}: {}", path, e))?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Git branch for the composer status cluster. Null on any failure — a
+/// missing binary or a non-repo folder is ordinary, never an error.
+fn resolve_git() -> Option<PathBuf> {
+    if let Ok(found) = which_git() { return Some(found); }
+    for p in ["/usr/bin/git", "/opt/homebrew/bin/git"] {
+        let pb = PathBuf::from(p);
+        if pb.is_file() { return Some(pb); }
+    }
+    None
+}
+fn which_git() -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").ok_or("no PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let cand = dir.join("git");
+        if cand.is_file() { return Ok(cand); }
+    }
+    Err("git not on PATH".into())
+}
+
+#[tauri::command]
+async fn pi_git_branch(cwd: String) -> Result<Value, String> {
+    let Some(git) = resolve_git() else { return Ok(serde_json::json!({ "branch": Value::Null })); };
+    let out = tokio::process::Command::new(git)
+        .arg("-C").arg(&cwd)
+        .arg("rev-parse").arg("--abbrev-ref").arg("HEAD")
+        .output().await.map_err(|e| format!("git failed: {}", e))?;
+    if !out.status.success() { return Ok(serde_json::json!({ "branch": Value::Null })); }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() { return Ok(serde_json::json!({ "branch": Value::Null })); }
+    Ok(serde_json::json!({ "branch": branch }))
+}
+
+#[tauri::command]
+async fn pi_coded_chat(cwd: String, name: String, first_message: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // A chat made by code: fresh session, `[code]`-prefixed name, optional
+    // first prompt. Group assignment stays frontend-side (localStorage).
+    let inst = ensure(&app, &pool, &cwd, None, true).await?;
+    let full = format!("[code] {}", name.trim());
+    inst_request(&pool, &inst, serde_json::json!({ "type": "set_session_name", "name": full })).await?;
+    learn_file(&pool, &inst).await;
+    let path = inst.session_file.lock().await.clone().ok_or("couldn't create session")?;
+    if let Some(m) = first_message {
+        if (!m.trim().is_empty()) {
+            let mut cmd = serde_json::json!({ "type": "prompt", "message": m });
+            attach_images(&mut cmd, None);
+            fire_inst(&pool, &inst, cmd).await?;
+        }
+    }
+    Ok(serde_json::json!({ "path": path }))
+}
+
 #[tauri::command]
 async fn pi_ui_response(cwd: String, session: Option<String>, id: String, payload: Value, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     let mut cmd = serde_json::json!({ "type": "extension_ui_response", "id": id });
@@ -985,6 +1064,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
     #[test]
+    fn open_path_gate_allows_md_inside_and_rejects_the_rest() {
+        let base = std::env::temp_dir().join(format!("pi-ui-open-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("docs")).unwrap();
+        std::fs::write(base.join("docs/a.md"), "# hi").unwrap();
+        std::fs::write(base.join("run.sh"), "x").unwrap();
+        let cwd = base.to_string_lossy().into_owned();
+        assert!(check_open_path(&cwd, "docs/a.md").is_ok());
+        assert!(check_open_path(&cwd, "docs/../docs/a.md").is_ok());
+        assert!(check_open_path(&cwd, "run.sh").is_err());
+        assert!(check_open_path(&cwd, "missing.md").is_err());
+        assert!(check_open_path(&cwd, "../outside.md").is_err());
+        assert!(check_open_path(&cwd, "https://x/y.md").is_err());
+        let abs_out = std::env::temp_dir().join(format!("pi-ui-abs-{}.md", uuid::Uuid::new_v4()));
+        std::fs::write(&abs_out, "x").unwrap();
+        assert!(check_open_path(&cwd, abs_out.to_string_lossy().as_ref()).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&abs_out);
+    }
+    #[test]
     fn rejection_is_an_error() {
         assert_eq!(checked_response(serde_json::json!({"success":false,"error":"denied"})).unwrap_err(), "denied");
         assert!(checked_response(serde_json::json!({"success":true})).is_ok());
@@ -1023,6 +1121,9 @@ fn main() {
             pi_clear_queue,
             pi_abort,
             pi_new_chat,
+            pi_open_path,
+            pi_git_branch,
+            pi_coded_chat,
             pi_get_messages,
             pi_get_state,
             pi_get_stats,

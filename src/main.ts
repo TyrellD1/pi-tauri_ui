@@ -1797,6 +1797,53 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
     if (img.isConnected) fallback();
   }
 }
+// Clickable chat paths (idea 2): .md/.html tokens become buttons that open
+// via the allowlisted backend command. Never inside links/code/pre/buttons.
+const PATH_TOKEN = /(^|[\s("'\[>])([\w.~\-/]+\.(md|html))\b/gi;
+function linkifyPaths(root: ParentNode) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const targets: Text[] = [];
+  while (walker.nextNode()) {
+    const n = walker.currentNode as Text;
+    const p = n.parentElement;
+    if (!p || p.closest("a,code,pre,button")) continue;
+    PATH_TOKEN.lastIndex = 0;
+    if (PATH_TOKEN.test(n.data)) targets.push(n);
+  }
+  for (const n of targets) {
+    if (!n.isConnected) continue;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    PATH_TOKEN.lastIndex = 0;
+    for (const m of n.data.matchAll(PATH_TOKEN)) {
+      const idx = m.index ?? 0;
+      const raw = m[2] ?? "";
+      if (!raw || raw.includes("://")) continue;
+      frag.append(n.data.slice(last, idx) + (m[1] ?? ""));
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "path-link";
+      b.textContent = raw;
+      b.dataset.openPath = raw;
+      b.title = `Open ${raw}`;
+      frag.append(b);
+      last = idx + m[0].length;
+    }
+    frag.append(n.data.slice(last));
+    n.replaceWith(frag);
+  }
+}
+messagesInner.addEventListener("click", async (e) => {
+  const b = (e.target as HTMLElement).closest("[data-open-path]") as HTMLElement | null;
+  if (!b) return;
+  const raw = b.dataset.openPath ?? "";
+  // Direct call with explicit cwd: opening a file must never spawn a pi process.
+  try {
+    await invokeChecked("pi_open_path", { cwd, path: raw });
+  } catch (err) {
+    notify({ text: `Couldn't open ${raw}: ${String(err)}`, kind: "error" });
+  }
+});
 function assistantTextBlock(text: string, key: string, images?: { data: string; mime: string }[]): HTMLElement {
   const div = document.createElement("div");
   div.className = "assistant-block";
@@ -1805,6 +1852,7 @@ function assistantTextBlock(text: string, key: string, images?: { data: string; 
     md.className = "md";
     md.innerHTML = renderMarkdown(text);
     resolveMdImages(md);
+    linkifyPaths(md);
     div.appendChild(md);
   }
   for (const im of images ?? []) {
@@ -1991,7 +2039,7 @@ function renderSettled() {
         let md = view.node.querySelector<HTMLElement>(".md");
         if (!md) { md = document.createElement("div"); md.className = "md"; view.node.prepend(md); }
         // Only the changed prose block is re-parsed; tools and prior prose stay untouched.
-        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) { md.innerHTML = renderMarkdown(b.text); resolveMdImages(md); }
+        if ((view.block as Extract<Block, {t:"text"}>).text !== b.text) { md.innerHTML = renderMarkdown(b.text); resolveMdImages(md); linkifyPaths(md); }
       }
       view.block = b;
     }
