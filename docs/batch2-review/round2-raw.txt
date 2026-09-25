@@ -1,0 +1,39 @@
+The five accepted material fixes are in the v2 text. Three of them are specified in a way that still fails against the current code, so this recheck is **unresolved**.
+
+## 1. Target and coverage
+
+Reviewed `docs/batch2-plan.md` as v2 (the brief’s sha256 `d7bdf63f…`). I did not recompute the hash. Diffed against `docs/batch2-review/plan-v1.md` and checked the round-1 decisions in `docs/batch2-review/round1-raw.txt`.
+
+Checked against `src/main.ts` (submit, `sessKey` / `visibleKey`, `pendingSend`, `refreshSessions`, `renderProjects`, groups prune, `pi_set_name`, copy handler), `src/logic.ts` (`renderMarkdown`, `deriveTitle`’s caller, `activityLabel`), `src-tauri/src/main.rs` (`pi_set_name` → `ensure` / `match_instance`, `parse_session_preview`, opener init), `index.html`, and `src/style.css` (header, composer footer, `.run-spin`).
+
+Coverage gaps: no `pi` RPC, no build or tests, opener crate source not opened, hash not recomputed. D1–D3 stay live checks.
+
+## 2. Findings
+
+**R2-F1. material. Plan §5.** Adopting `sessionFile` by writing `activePath` changes `sessKey()` from `` `${cwd}:new` `` to `` `${cwd}:${path}` `` while `pendingSend.owner` was captured before that (`src/main.ts` around the `sessKey` helper and `submit()`). `reconcileSend` then returns immediately (`p.owner !== sessKey()`), so the optimistic send stays for the whole turn. The real user block and the pending block share `m-${index}`, and the pending block is rendered second, so a skill-expanded message keeps the draft text until `agent_settled` clears `pendingSend`. The same key split hides any failed-send card stored under `cwd:new`. Separately, the adopt runs only after `await pi_get_state`. Events during that await are already classified with `visibleKey()` `cwdkey:…` against an event key `cwd:file`, so `isVis` is false and those `message_*` deltas are dropped. The plan’s claim that this adopt fixes event tagging does not cover that window. Remedy: when adopting, retarget `pendingSend.owner` (and the in-flight `owner`) to the new key, and treat a same-cwd event as this view when `activePath` is still empty, before the `isVis` check.
+
+**R2-F2. material. Plan §7, interacting with the §5 revision.** After `{ path }` returns, the caller appends the group and calls `renderProjects`. That paints lists already in memory. `groupChats` skips any path `findProjectForPath` cannot see. Item 5’s refresh now lives only on `submit()`’s accept path, plus one settle backup for that guard, and the plan says `newChatInProject` must not refresh. A coded chat never enters `submit()`. With no `firstMessage` there is also no settle. The row does not appear, so “lists immediately (ties into item 5 refresh)” does not hold. Related: `refreshAllProjects` drops `pi-chat-groups` paths missing from the scan whenever `unseenFinished` is non-empty, and §7’s coded-path set is outside that filter, so a path can leave the group and still be badged. Remedy: refresh the session list first, then write the group and the coded-path set only for a path that is actually listed, and run the coded-path set through the same retention rule as groups.
+
+**R2-F3. material. Plan §2.** `pi_open_path { path }` has no `cwd`, but the inside-cwd check has to canonicalize both the chat cwd and the file. Scoped commands get `cwd` from the frontend (`invokeScoped` / `visibleScope`). This signature does not. The app process cwd is not the project folder, so the containment check rejects project files and the click does nothing. Remedy: `pi_open_path { cwd, path }`, called with the chat cwd, then canonicalize both sides.
+
+## 3. Checks
+
+| Check | Outcome |
+| --- | --- |
+| R1-F1 group off Rust | Present. `pi_coded_chat { cwd, name, firstMessage? }`, group written in the webview after `{ path }`, caller stated as in-app, Rust test is prefix plus no-prompt and no live `pi`. |
+| R1-F2 badge fallback | Present. D1 records the name-record shape; §7 badges `[code]` names and, if the parser cannot read names, a localStorage coded-path set. See R2-F2 for set vs group retention. |
+| R1-F3 refresh timing | Present as specified: adopt on the accept-time state read, `refreshSessions`, guard only once listed, one settle backup, no extra refresh in `newChatInProject`. Underspecified against `sessKey` and the event loop (R2-F1). |
+| R1-F4 `targetScope` | Holds. `pi_set_name` is `(cwd, session: Option<String>, name)` and routes through `ensure` / `match_instance`, not `find`. `invokeChecked("pi_set_name", { cwd, session, name })` matches. `find` is only abort, queue clear, and UI response. A direct call does not leave `targetScope` set. |
+| R1-F5 copy vs collapse | Present. Visual collapse only; copy stays on `pre.textContent`; regressions cover full text and the 50-line cutoff. The handler’s `pre` variable is the `<code>` element; its `textContent` is the fence text. |
+| R1-F6 compaction row | Present. Row omitted unless D3 finds a field. D3’s own checklist still only names `contextUsage`. |
+| R1-F7 one footer owner | Present. Circle is header-only; footer is spinner + status + branch; idle `Ready` is the one `activityLabel("idle")` string. Header is 56px, title ellipsizes (`min-width: 0`), `.header-actions` is `flex-shrink: 0`, so an `NN%` control fits. `#token-line` still has `margin-left: auto` and is not named in §6; put the branch there or move that margin, or the branch will not own the right edge. `#ctx-warn` stays in the footer, which §1 already keeps. |
+| R1-F8 opener, canonicalize, git | Opener plugin and `opener:default` are already wired. Git fallback is PATH, then `/usr/bin/git`, then `/opt/homebrew/bin/git`. Both-sides canonicalize is stated. The cwd value for that check is missing (R2-F3). |
+| R1-F9 `deriveTitle` | Present. Whitespace-collapse, then slice to 48, in the auto-rename path and as a `deriveTitle` cleanup. |
+| Idea 8, protocol, deps, polling | Idea 8 stays excluded. Commands stay on existing RPC verbs, `open`, and `git`. No new deps or timers. |
+| Tests, RPC, build, hash | Not run. |
+
+## 4. Open questions and verdict
+
+D1–D3 stay open on purpose. Item 6’s right-hand cluster stays a non-blocking interpretation. I could not confirm the opener plugin’s Rust method name, whether the path string `pi_coded_chat` returns equals the path `list_sessions` later shows, or whether the session file is visible at the moment prompt accept returns.
+
+**Verdict: unresolved.** F1, F2, F4, and F5 match the accepted remedies. F3 and F8 are in the text and still mis-specify the code they touch, and the §5 revision leaves §7’s “lists immediately” claim false. This is the last pass, so those three lines would ship unreviewed. Limits: read-only, no live `pi`, no build, hash not recomputed.

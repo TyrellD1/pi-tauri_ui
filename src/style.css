@@ -286,6 +286,9 @@ h1 { margin: 0; }
 }
 .codeblock-head button:hover, .codeblock-head button:focus-visible { color: var(--ink); opacity: 1; }
 .codeblock pre { margin: 0; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; line-height: 1.55; }
+.codeblock.json-long.json-collapsed pre { max-height: 320px; overflow-y: hidden; }
+.codeblock-head span:first-child { margin-right: auto; }
+.codeblock-head button + button { margin-left: 6px; }
 .codeblock pre code { font-family: var(--mono); background: none; padding: 0; font-size: inherit; }
 
 /* user messages: restrained right-aligned fill */

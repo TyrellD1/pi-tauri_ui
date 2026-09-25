@@ -1981,6 +1981,17 @@ function renderSettled() {
   messagesInner.querySelectorAll<HTMLButtonElement>(".retry-btn").forEach(b => b.disabled = streaming || stopping || booting || !!bootError || !!sendInFlight);
 }
 
+// long-JSON collapse toggle (visual only — full text stays for Copy)
+messagesInner.addEventListener("click", (e) => {
+  const tgl = (e.target as HTMLElement).closest("[data-toggle-json]") as HTMLButtonElement | null;
+  if (tgl) {
+    const box = tgl.closest(".codeblock");
+    if (!box) return;
+    const collapsed = box.classList.toggle("json-collapsed");
+    tgl.textContent = collapsed ? "Show more" : "Show less";
+    return;
+  }
+});
 // code-copy delegation (copies decoded full code, only confirms on success)
 messagesInner.addEventListener("click", async (e) => {
   const btn = (e.target as HTMLElement).closest("[data-copy-code]") as HTMLButtonElement | null;

@@ -81,5 +81,17 @@ check("just now", logic.fmtRelative(Date.now() - 10_000) === "just now");
 check("minutes", logic.fmtRelative(Date.now() - 5 * 60_000) === "5m ago");
 check("hours", logic.fmtRelative(Date.now() - 3 * 3600_000) === "3h ago");
 
+// 8. json fences pretty-print; long json collapses visually, copy keeps full text
+const ugly = logic.renderMarkdown("```json\n{\"b\":2,\"a\":[1,2]}\n```");
+check("json pretty-prints", ugly.includes("&quot;b&quot;: 2") && ugly.includes("&quot;a&quot;: ["));
+const badJson = logic.renderMarkdown("```json\nnot json at all\n```");
+check("invalid json passes through", badJson.includes("not json at all"));
+const longJson = "```json\n" + JSON.stringify(Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`k${i}`, i]))) + "\n```";
+const longOut = logic.renderMarkdown(longJson);
+check("long json collapses", longOut.includes("json-long json-collapsed") && longOut.includes("data-toggle-json"));
+check("long json keeps full text for copy", (longOut.match(/k\d+/g) || []).length >= 60);
+const shortJson = logic.renderMarkdown("```json\n{\"a\":1}\n```");
+check("short json stays open", !shortJson.includes("json-collapsed"));
+
 console.log(`\n${pass} checks passed${process.exitCode ? " (with failures)" : ""}`);
 rmSync(dir, { recursive: true, force: true });
