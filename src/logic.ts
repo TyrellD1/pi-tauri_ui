@@ -46,14 +46,14 @@ export function renderMarkdown(src: string): string {
       }
       // Long JSON collapses visually only — the full text stays in the DOM
       // so Copy keeps copying everything.
-      html += `<div class="codeblock${jsonLong ? " json-long json-collapsed" : ""}"><div class="codeblock-head"><span>${esc(lang)}</span>${jsonLong ? `<button type="button" data-toggle-json>Show more</button>` : ""}<button type="button" data-copy-code>Copy</button></div><pre><code>${esc(body)}</code></pre></div>`;
+      html += `<div class="codeblock${jsonLong ? " json-long json-collapsed" : ""}"><div class="codeblock-head"><span>${esc(lang)}</span>${jsonLong ? `<button type="button" data-toggle-json aria-expanded="false">Show more</button>` : ""}<button type="button" data-copy-code aria-label="Copy code">Copy</button></div><pre><code>${esc(body)}</code></pre></div>`;
       continue;
     }
     const delim = lines[i+1] ? cells(lines[i+1]) : [];
     if (line.includes("|") && delim.length === cells(line).length && delim.every(d => /^:?-{2,}:?$/.test(d))) {
       flush(); const head = cells(line); i++;
       const style = (n: number) => delim[n].endsWith(":") ? delim[n].startsWith(":") ? "center" : "right" : "left";
-      html += `<div class="tbl-wrap"><table><thead><tr>${head.map((c,n) => `<th style="text-align:${style(n)}">${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>`;
+      html += `<div class="tbl-wrap" tabindex="0" role="region" aria-label="Table"><table><thead><tr>${head.map((c,n) => `<th style="text-align:${style(n)}">${inlineMd(c)}</th>`).join("")}</tr></thead><tbody>`;
       while (i+1 < lines.length && lines[i+1].includes("|") && lines[i+1].trim()) {
         const row = cells(lines[++i]); html += `<tr>${head.map((_,n) => `<td style="text-align:${style(n)}">${inlineMd(row[n] ?? "")}</td>`).join("")}</tr>`;
       }

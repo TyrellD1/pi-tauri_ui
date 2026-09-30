@@ -1,3 +1,5 @@
+import { focusableWithin, trapFocus, makeImageZoomable } from "./accessibility";
+import { initNavigation } from "./navigation";
 import { Conversation, type Message, textOf } from "./conversation";
 import { invoke, listen } from "./tauri-shim";
 import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
@@ -20,7 +22,7 @@ interface PiEvent { type: string; [k: string]: unknown }
 interface Draft { text: string; images: PendingImage[] }
 interface FailedSend extends Draft { id: string; error: string; owner: string; kind: "prompt" | "steer" | "follow_up" }
 interface PendingSend extends Draft { id: string; owner: string; index: number }
-interface UiDialog { id: string; card: HTMLElement; inFlight: boolean }
+interface UiDialog { id: string; scope: {cwd:string;session:string|null}; card: HTMLElement; inFlight: boolean }
 // ---------- dom ----------
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -56,6 +58,8 @@ const menuBtn = $("btn-menu") as HTMLButtonElement;
 const jumpBtn = $("jump-latest") as HTMLButtonElement;
 const connError = $("conn-error");
 
+const navigation = initNavigation();
+
 // ---------- state ----------
 let activeName = "";
 let cwd = "", sessions: SessionInfo[] = [], activePath: string | null = null;
@@ -80,7 +84,7 @@ let streamActivity = "thinking", streamActivityTool = "";
 let pendingSend: PendingSend | null = null, sendInFlight: string | null = null;
 const failedBySession = new Map<string, FailedSend[]>();
 const drafts = new Map<string, Draft>();
-let filter = "", visibleLimit = 100, debounceT: number | null = null, stickToBottom = true;
+let filter = "", debounceT: number | null = null, stickToBottom = true;
 let pendingImages: PendingImage[] = [];
 const expandedTools = new Set<string>(), showThinkingFor = new Set<string>(), fullTextByKey = new Map<string, string>();
 let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
@@ -155,7 +159,7 @@ function scrollBottom(force = false) {
 }
 
 // ---------- notices ----------
-function notify(opts: { text: string; kind?: "info" | "error"; sticky?: boolean; retryLabel?: string; onRetry?: () => void; details?: string }) {
+function notify(opts: { text: string; kind?: "info" | "error"; sticky?: boolean; duration?: number; retryLabel?: string; onRetry?: () => void; details?: string }) {
   const el = document.createElement("div");
   el.className = "notice" + (opts.kind === "error" ? " error" : "");
   const body = document.createElement("div");
@@ -195,7 +199,7 @@ function notify(opts: { text: string; kind?: "info" | "error"; sticky?: boolean;
   el.appendChild(actions);
   noticesEl.appendChild(el);
   if (!opts.sticky && opts.kind !== "error") {
-    setTimeout(() => el.remove(), 6000);
+    setTimeout(() => el.remove(), opts.duration ?? 6000);
   }
 }
 
@@ -291,11 +295,11 @@ function openMenu(items: (MenuItem | "sep")[], at?: { left: number; top: number 
       closeMenu();
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      idx = (idx + 1) % buttons.length;
+      idx = (buttons.indexOf(document.activeElement as HTMLButtonElement) + 1) % buttons.length;
       buttons[idx].focus();
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      idx = (idx - 1 + buttons.length) % buttons.length;
+      idx = (buttons.indexOf(document.activeElement as HTMLButtonElement) - 1 + buttons.length) % buttons.length;
       buttons[idx].focus();
     } else if (e.key === "Home") {
       e.preventDefault();
@@ -322,6 +326,7 @@ function openHeaderMenu() {
   const quiet = document.body.classList.contains("quiet");
   openMenu([
     { label: "Session details", onPick: openSessionDetails },
+    { label: "New coded chat…", onPick: openNewCodedChat },
     { label: "Compact context", onPick: doCompact },
     { label: "Export conversation", onPick: doExport },
     { label: "Rename chat", onPick: openRename },
@@ -358,10 +363,11 @@ chatTitle.ondblclick = () => { if (!booting && !bootError) openRename(); };
 let modalPrevFocus: HTMLElement | null = null;
 function closeModal() {
   modalRoot.innerHTML = "";
+  navigation.sync();
   if (modalPrevFocus && document.contains(modalPrevFocus)) {
     modalPrevFocus.focus();
     modalPrevFocus = null;
-  }
+  } else { modalPrevFocus = null; inputEl.focus(); }
 }
 function openModal(title: string, build: (body: HTMLElement, close: () => void) => void, opts?: { wide?: boolean }) {
   modalPrevFocus = document.activeElement as HTMLElement;
@@ -373,12 +379,15 @@ function openModal(title: string, build: (body: HTMLElement, close: () => void) 
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-modal", "true");
   box.setAttribute("aria-label", title);
-  const h = document.createElement("h3");
+  box.tabIndex = -1;
+  const h = document.createElement("h2");
   h.textContent = title;
   box.appendChild(h);
   build(box, closeModal);
   back.appendChild(box);
   modalRoot.appendChild(back);
+  navigation.sync();
+  box.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input:not([type=file]), textarea").forEach(el => { el.name ||= el.id || "value"; el.autocomplete = "off"; });
   back.addEventListener("mousedown", (e) => {
     if (e.target === back) closeModal();
   });
@@ -388,64 +397,66 @@ function openModal(title: string, build: (body: HTMLElement, close: () => void) 
       closeModal();
       return;
     }
-    if (e.key !== "Tab") return;
-    const f = Array.from(box.querySelectorAll<HTMLElement>("button, input, select, textarea, [tabindex]")).filter(
-      (el) => !el.hasAttribute("disabled")
-    );
-    if (f.length === 0) return;
-    const first = f[0];
-    const last = f[f.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
+    trapFocus(e, box);
   });
-  const firstInput = box.querySelector<HTMLElement>("input, select, textarea, button");
-  setTimeout(() => firstInput?.focus(), 20);
+  (focusableWithin(box)[0] ?? box).focus();
 }
 
+function fieldError(input: HTMLInputElement, message: string) {
+  let error = input.closest(".modal")?.querySelector<HTMLElement>(`#${input.id}-error`);
+  if (!error) {
+    error = document.createElement("p"); error.id = `${input.id}-error`; error.className = "field-error";
+    error.setAttribute("role","alert"); (input.closest(".path-row") ?? input).after(error);
+  }
+  error.textContent = message; input.setAttribute("aria-invalid", String(!!message));
+  input.setAttribute("aria-describedby", error.id);
+  if (message) input.focus();
+}
+function requiredText(input: HTMLInputElement, message: string): string | null {
+  const value = input.value.trim(); fieldError(input,value ? "" : message); return value || null;
+}
 function openSettings() {
   openModal("Settings", (box, close) => {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Choose the project you want to work on.";
-    const lab = document.createElement("label");
-    lab.textContent = "Project folder";
-    lab.setAttribute("for", "m-cwd");
-    const inp = document.createElement("input");
-    inp.id = "m-cwd";
-    inp.value = cwd;
-    const hint = document.createElement("p");
-    hint.className = "muted";
-    hint.textContent = "Switches to that folder's chats. Running chats keep running. Drafts stay with their original chat.";
-    const row = document.createElement("div");
-    row.className = "dialog-actions";
-    const c = document.createElement("button");
-    c.type = "button";
-    c.textContent = "Cancel";
-    c.onclick = close;
-    const s = document.createElement("button");
-    s.type = "button";
-    s.textContent = "Save";
-    s.className = "primary";
-    s.onclick = async () => {
-      const ncwd = inp.value.trim();
-      close();
-      if (ncwd && ncwd !== cwd) await setCwd(ncwd);
+    const p = document.createElement("p"); p.className = "muted"; p.textContent = "Choose a project folder and how pi looks.";
+    const lab = document.createElement("label"); lab.textContent = "Project folder"; lab.htmlFor = "m-cwd";
+    const inp = document.createElement("input"); inp.id = "m-cwd"; inp.value = cwd; inp.spellcheck = false;
+    const pathRow = document.createElement("div"); pathRow.className = "path-row";
+    const browse = document.createElement("button"); browse.type = "button"; browse.className = "text-btn"; browse.textContent = "Browse…";
+    browse.onclick = async () => {
+      try { const path = await openFolderPicker({directory:true,multiple:false,defaultPath:inp.value || cwd}); if (typeof path === "string") { inp.value = path; fieldError(inp,""); } }
+      catch { fieldError(inp,"Couldn't open the folder picker. Enter the folder's full path here."); }
     };
-    row.appendChild(c);
-    row.appendChild(s);
-    box.appendChild(p);
-    box.appendChild(lab);
-    box.appendChild(inp);
-    box.appendChild(hint);
-    box.appendChild(row);
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) s.click();
-    });
+    pathRow.append(inp,browse);
+    const hint = document.createElement("p"); hint.className = "muted";
+    hint.textContent = "Running chats keep running. Drafts stay with their chat.";
+    const appearanceLabel = document.createElement("label"); appearanceLabel.htmlFor = "m-theme"; appearanceLabel.textContent = "Appearance";
+    const appearance = document.createElement("select"); appearance.id = "m-theme"; appearance.name = "appearance";
+    for (const [value,label] of [["system","Follow system"],["light","Light"],["dark","Dark"]]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; appearance.append(option);
+    }
+    appearance.value = document.documentElement.dataset.themePreference ?? "system";
+    appearance.onchange = () => setThemePreference(appearance.value as "system" | "light" | "dark");
+    const shortcuts = document.createElement("details"); shortcuts.className = "settings-shortcuts";
+    const summary = document.createElement("summary"); summary.textContent = "Keyboard shortcuts";
+    const shortcutsText = document.createElement("p"); shortcutsText.textContent = "⌘N New chat · ⌘K Search chats · ⌘\\ Show or hide chats · ⌘, Settings · Enter Send · Shift+Enter New line · Esc Stop or close the current menu";
+    shortcuts.append(summary,shortcutsText);
+    const row = document.createElement("div"); row.className = "dialog-actions";
+    const c = document.createElement("button"); c.type = "button"; c.textContent = "Cancel"; c.onclick = close;
+    const save = document.createElement("button"); save.type = "button"; save.textContent = "Save"; save.className = "primary";
+    save.onclick = async () => {
+      const dir = requiredText(inp,"Enter a project folder or choose Browse."); if (!dir || save.disabled) return;
+      if (dir === cwd) { close(); return; }
+      if (!dir.startsWith("/")) { fieldError(inp,"Enter the full folder path, starting with /."); return; }
+      save.disabled = true; save.textContent = "Opening…";
+      try {
+        await setCwd(dir);
+        if (cwd === dir) close();
+        else fieldError(inp,"Couldn't open this project. Check the path and try again.");
+      } finally { save.disabled = false; save.textContent = "Save"; }
+    };
+    row.append(c,save); box.append(p,lab,pathRow,hint,appearanceLabel,appearance,shortcuts,row);
+    inp.addEventListener("input", () => fieldError(inp,""));
+    inp.addEventListener("keydown", e => { if (e.key === "Enter" && !e.isComposing) { e.preventDefault(); save.click(); } });
   });
 }
 
@@ -461,7 +472,7 @@ function openRename(target?: { cwd: string; session: string | null; current: str
     const inp = document.createElement("input");
     inp.id = "m-name";
     inp.value = target?.current ?? (chatTitle.textContent === "New chat" ? "" : chatTitle.textContent ?? "");
-    inp.placeholder = "e.g. refactor-auth";
+    inp.placeholder = "For example, Review sign-in…";
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const c = document.createElement("button");
@@ -473,15 +484,15 @@ function openRename(target?: { cwd: string; session: string | null; current: str
     s.textContent = "Save";
     s.className = "primary";
     s.onclick = async () => {
-      const name = inp.value.trim();
-      close();
-      if (!name) return;
+      const name = requiredText(inp,"Enter a name for this chat.");
+      if (!name || s.disabled) return;
+      s.disabled = true; s.textContent = "Saving…";
       try {
         if (target && (target.session !== activePath || target.cwd !== cwd)) {
           // Row rename: direct scoped call, never via targetScope (R2-F1's
           // sibling — the global override would retarget every command).
           if (target.session && runningSet.has(`${target.cwd}:${target.session}`)) {
-            notify({ text: "Wait for the turn to finish before renaming." });
+            fieldError(inp,"Wait for this chat’s turn to finish before renaming.");
             return;
           }
           await invokeChecked("pi_set_name", { cwd: target.cwd, session: target.session, name });
@@ -492,9 +503,10 @@ function openRename(target?: { cwd: string; session: string | null; current: str
           await refreshState();
           await refreshSessions();
         }
+      close();
       } catch (e) {
-        notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openRename(target) });
-      }
+        fieldError(inp,`Couldn’t save the name. Try again. ${String(e)}`);
+      } finally { s.disabled = false; s.textContent = "Save"; }
     };
     row.appendChild(c);
     row.appendChild(s);
@@ -788,7 +800,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
     search.setAttribute("spellcheck", "false");
     const list = document.createElement("div");
     list.className = "pick-list";
-    list.setAttribute("role", "listbox");
+    list.setAttribute("role", "group");
     list.setAttribute("aria-label", "Folders");
     const err = document.createElement("div");
     err.className = "pick-error";
@@ -807,6 +819,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
     select.type = "button";
     select.className = "primary";
     select.textContent = selectLabel;
+    select.disabled = true;
     row.appendChild(finder);
     row.appendChild(cancel);
     row.appendChild(select);
@@ -870,7 +883,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
         const b = document.createElement("button");
         b.type = "button";
         b.className = "pick-row";
-        b.setAttribute("role", "option");
+
         b.title = full;
         const name = document.createElement("span");
         name.textContent = baseName(full);
@@ -888,6 +901,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
     let navGen = 0;
     async function nav(path: string) {
       const gen = ++navGen;
+      select.disabled = true;
       err.textContent = "";
       let d = cache.get(path);
       if (!d) {
@@ -898,13 +912,13 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
         list.appendChild(l);
         try {
           d = await invoke<DirListOut>("pi_list_dirs", { path });
-          if (gen !== navGen) return;
+          if (gen !== navGen || !box.isConnected) return;
           cache.set(path, d);
         } catch (e) {
-          if (gen !== navGen) return;
+          if (gen !== navGen || !box.isConnected) return;
           err.textContent = typeof e === "string" && e ? e : e instanceof Error ? e.message : "Couldn't list that folder.";
           const back = cache.get(cur);
-          if (back) renderList(back, search.value);
+          if (back) { renderList(back, search.value); select.disabled = false; }
           else {
             list.replaceChildren();
             const f = document.createElement("div");
@@ -915,6 +929,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
           return;
         }
       }
+      select.disabled = false;
       cur = d.path;
       home = d.home || home;
       renderCrumbs(d);
@@ -959,7 +974,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
         notify({ text: "Couldn't open the folder picker." });
       }
     };
-    select.onclick = () => { close(); onPick(cur); };
+    select.onclick = () => { if (select.disabled) return; close(); onPick(cur); };
     nav(startDir);
   }, { wide: true });
 }
@@ -968,6 +983,8 @@ function openAddProject() {
 }
 
 function removeProject(project: string) {
+  const previous = projectChats.get(project);
+  const wasExpanded = expandedProjects.has(project);
   const added = addedProjects();
   if (added.includes(project)) {
     prefSet("pi-added-projects", JSON.stringify(added.filter((p) => p !== project)));
@@ -980,6 +997,13 @@ function removeProject(project: string) {
   expandedProjects.delete(project);
   saveExpanded();
   renderProjects();
+  notify({text:`Removed ${baseName(project)} from the list.`,retryLabel:"Undo",duration:10000,onRetry:() => {
+    const hidden = hiddenProjects(); hidden.delete(project); prefSet("pi-hidden-projects",JSON.stringify([...hidden]));
+    if (added.includes(project)) prefSet("pi-added-projects",JSON.stringify([...new Set([...addedProjects(),project])]));
+    if (previous) projectChats.set(project,previous);
+    if (wasExpanded) expandedProjects.add(project);
+    saveExpanded(); renderProjects();
+  }});
 }
 
 async function openChat(project: string, path: string) {
@@ -990,7 +1014,7 @@ function chatMatches(s: SessionInfo, q: string): boolean {
   return !q || (s.name ?? "").toLowerCase().includes(q) || s.preview.toLowerCase().includes(q);
 }
 
-function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
+function chatButton(s: SessionInfo, project: string): HTMLElement {
   const el = document.createElement("button");
   el.type = "button";
   el.className = "chat-item";
@@ -1039,18 +1063,113 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   el.appendChild(row);
   if (s.name && s.preview && s.preview !== s.name) el.appendChild(sub);
   el.disabled = navigating || booting;
+  el.title = `${s.name || s.preview || "Untitled"} · ${new Date(s.mtime).toLocaleString()}`;
+  el.dataset.focusKey = `chat:${project}:${s.path}`;
   el.onclick = () => openChat(project, s.path);
-  return el;
+  const wrap = document.createElement("div"); wrap.className = "chat-row";
+  const actions = document.createElement("button"); actions.type = "button"; actions.className = "icon-action chat-actions";
+  actions.setAttribute("aria-label", `Actions for ${rlabel}`); actions.setAttribute("aria-haspopup", "menu");
+  actions.dataset.focusKey = `actions:${project}:${s.path}`;
+  actions.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></svg>';
+  actions.disabled = el.disabled || !project;
+  const showActions = () => {
+    const r = actions.getBoundingClientRect();
+    openChatMenu(r.left, r.bottom + 4, {path:s.path, project, inGroup:wrap.closest<HTMLElement>(".group-section")?.dataset.group ?? null});
+  };
+  actions.onclick = showActions;
+  el.addEventListener("keydown", e => {
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) { e.preventDefault(); showActions(); }
+  });
+  wrap.append(el, actions);
+  return wrap;
 }
 
+// All sections share a 200-row budget. Search operates on the full data set.
+let sidebarRows = 0;
+const sectionPages = new Map<string, number>();
 function renderProjects() {
+  const focused = document.activeElement as HTMLElement | null;
+  const focusKey = focused && chatListEl.contains(focused) ? focused.dataset.focusKey : null;
+  const scroll = chatListEl.scrollTop;
   const q = filter.trim().toLowerCase();
-  chatListEl.innerHTML = "";
-  const parents = parentsOpen();
-  renderRecentParent(q, parents.recent);
-  renderGroupsParent(q, parents.groups);
-  renderProjectsParent(q, parents.projects);
+  chatListEl.replaceChildren(); sidebarRows = 0;
+  if (q) renderSearchResults(q);
+  else {
+    const parents = parentsOpen();
+    renderRecentParent(q, parents.recent);
+    renderGroupsParent(q, parents.groups);
+    renderProjectsParent(q, parents.projects);
+  }
+  chatListEl.querySelectorAll<HTMLElement>("button:not([data-focus-key])").forEach(b => {
+    const group = b.closest<HTMLElement>('[role="group"]')?.getAttribute("aria-label") ?? "";
+    b.dataset.focusKey = `${group}:${b.getAttribute("aria-label") ?? b.textContent}`;
+  });
+  if (focusKey) {
+    const next = [...chatListEl.querySelectorAll<HTMLElement>("[data-focus-key]")].find(b => b.dataset.focusKey === focusKey);
+    (next && !next.matches(":disabled") ? next : searchEl).focus({preventScroll:true});
+  }
+  chatListEl.scrollTop = scroll;
+  $("btn-clear-search").classList.toggle("hidden", !searchEl.value);
 }
+function pageChats(box: HTMLElement, list: {info: SessionInfo; project: string}[], key: string) {
+  const size = Math.min(100, 200 - sidebarRows);
+  if (size <= 0) {
+    const note = document.createElement("p"); note.className = "project-empty";
+    note.textContent = "Search all chats above, or close another section to see these chats."; box.append(note); return;
+  }
+  let page = Math.min(sectionPages.get(key) ?? 0, Math.max(0, Math.ceil(list.length / size) - 1));
+  sectionPages.set(key, page);
+  const start = page * size, shown = list.slice(start, start + size);
+  for (const {info,project} of shown) { box.append(chatButton(info,project)); sidebarRows++; }
+  if (list.length <= size) return;
+  const nav = document.createElement("div"); nav.className = "chat-page";
+  const count = document.createElement("p"); count.textContent = `${start + 1}–${start + shown.length} of ${list.length}`; nav.append(count);
+  for (const [label,step] of [["Previous chats",-1],["Older chats",1]] as const) {
+    const btn = document.createElement("button"); btn.type = "button"; btn.textContent = label;
+    btn.disabled = step < 0 ? page === 0 : start + size >= list.length;
+    btn.dataset.focusKey = `page:${key}:${step}`;
+    btn.onclick = () => {
+      sectionPages.set(key,page + step); renderProjects();
+      const first = [...chatListEl.querySelectorAll<HTMLElement>(".chat-item")].find(el => el.closest<HTMLElement>('[data-page-key]')?.dataset.pageKey === key);
+      first?.focus();
+    };
+    nav.append(btn);
+  }
+  box.dataset.pageKey = key; box.append(nav);
+}
+function renderSearchResults(q: string) {
+  const all = recentChats(q);
+  const head = document.createElement("div"); head.className = "search-results-head"; head.setAttribute("role","status");
+  head.textContent = `${all.length} ${all.length === 1 ? "chat" : "chats"} found`; chatListEl.append(head);
+  if (!all.length) {
+    const empty = document.createElement("div"); empty.className = "list-empty";
+    const text = document.createElement("p"); text.textContent = `No chats match “${filter.trim()}”. Try a chat name or words from its first message.`;
+    const clear = document.createElement("button"); clear.type = "button"; clear.textContent = "Clear search"; clear.onclick = clearSearch;
+    empty.append(text,clear); chatListEl.append(empty); return;
+  }
+  const box = document.createElement("div"); box.className = "search-results";
+  pageChats(box,all,"search"); chatListEl.append(box);
+  box.querySelectorAll<HTMLElement>(".chat-row").forEach(row => {
+    const project = row.querySelector<HTMLElement>(".chat-item")?.dataset.project;
+    const label = document.createElement("div"); label.className = "search-result-project"; label.textContent = baseName(project ?? "");
+    label.title = project ?? ""; row.after(label);
+  });
+}
+function clearSearch() {
+  if (debounceT) { clearTimeout(debounceT); debounceT = null; }
+  searchEl.value = ""; filter = ""; sectionPages.delete("search"); renderProjects(); searchEl.focus();
+}
+$("btn-clear-search").onclick = clearSearch;
+searchEl.addEventListener("keydown", e => {
+  if (e.isComposing) return;
+  if (e.key === "Escape" && searchEl.value) { e.preventDefault(); e.stopPropagation(); clearSearch(); }
+  else if (e.key === "ArrowDown" || e.key === "Enter") {
+    e.preventDefault();
+    if (debounceT) { clearTimeout(debounceT); debounceT = null; }
+    filter = searchEl.value; renderProjects(); chatListEl.querySelector<HTMLElement>(".chat-item:not(:disabled)")?.focus();
+  }
+});
+
 function parentHead(title: string, key: keyof ParentState, isOpen: boolean, extra: HTMLElement | null): HTMLElement {
   const row = document.createElement("div");
   row.className = "p-row parent-row";
@@ -1059,6 +1178,7 @@ function parentHead(title: string, key: keyof ParentState, isOpen: boolean, extr
   head.className = "project-head parent-head" + (isOpen ? " open" : "");
   head.setAttribute("aria-expanded", String(isOpen));
   head.title = title;
+  head.dataset.focusKey = `parent:${key}`;
   const chev = document.createElement("span");
   chev.innerHTML = chevSvg();
   const name = document.createElement("span");
@@ -1122,7 +1242,7 @@ function renderRecentParent(q: string, isOpen: boolean) {
     body.appendChild(e);
     return;
   }
-  for (const { info, project } of shown) body.appendChild(chatButton(info, project));
+  for (const { info, project } of shown) { body.appendChild(chatButton(info, project)); sidebarRows++; }
   if (all.length > 5) {
     const more = document.createElement("button");
     more.type = "button";
@@ -1149,7 +1269,7 @@ function renderGroupsParent(q: string, isOpen: boolean) {
   if (!q && names.length === 0) {
     const e = document.createElement("div");
     e.className = "project-empty";
-    e.textContent = "No groups yet. Right-click any chat to group it.";
+    e.textContent = "Keep related chats together. Use a chat’s actions to add it to a group.";
     section.appendChild(e);
   }
   chatListEl.appendChild(section);
@@ -1169,6 +1289,7 @@ function groupSection(name: string, list: { info: SessionInfo; project: string }
   head.className = "project-head" + (open ? " open" : "");
   head.setAttribute("aria-expanded", String(open));
   head.title = name;
+  head.dataset.focusKey = `group:${name}`;
   const chev = document.createElement("span");
   chev.innerHTML = chevSvg();
   const label = document.createElement("span");
@@ -1203,10 +1324,13 @@ function groupSection(name: string, list: { info: SessionInfo; project: string }
   x.setAttribute("aria-label", `Delete group ${name}`);
   x.onclick = () => {
     const g = loadGroups();
+    const members = g[name];
     delete g[name];
     saveGroups(g);
     renderProjects();
-    notify({ text: `Deleted group ${name}. Its chats stay in their projects.` });
+    notify({ text: `Deleted group ${name}. Its chats stay in their projects.`, retryLabel:"Undo", duration:10000, onRetry:() => {
+      const current = loadGroups(); current[name] = [...new Set([...(current[name] ?? []),...members])]; saveGroups(current); renderProjects(); renderChatContext();
+    }});
   };
   row.appendChild(x);
   section.appendChild(row);
@@ -1216,10 +1340,10 @@ function groupSection(name: string, list: { info: SessionInfo; project: string }
   if (list.length === 0) {
     const e = document.createElement("div");
     e.className = "project-empty";
-    e.textContent = q ? "No matches in this group." : "No chats yet. Right-click a chat to add it here.";
+    e.textContent = q ? "No matches in this group." : "Use a chat’s actions to add it here, or start a new chat with +.";
     box.appendChild(e);
   } else {
-    for (const { info, project } of list) box.appendChild(chatButton(info, project));
+    pageChats(box, list, `group:${name}`);
   }
   section.appendChild(box);
   return section;
@@ -1231,7 +1355,7 @@ function openNewGroup(firstPath: string | null) {
     lab.setAttribute("for", "m-group");
     const inp = document.createElement("input");
     inp.id = "m-group";
-    inp.placeholder = "e.g. launch-blockers";
+    inp.placeholder = "For example, Launch tasks…";
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const c = document.createElement("button");
@@ -1243,10 +1367,11 @@ function openNewGroup(firstPath: string | null) {
     s.textContent = "Create";
     s.className = "primary";
     s.onclick = () => {
-      const name = inp.value.trim();
-      close();
+      const name = requiredText(inp,"Enter a name for this group.");
       if (!name) return;
       const g = loadGroups();
+      if (g[name]) { fieldError(inp,"A group has this name. Choose a different name."); return; }
+      close();
       if (!g[name]) g[name] = [];
       if (firstPath && !g[name].includes(firstPath)) g[name].push(firstPath);
       saveGroups(g);
@@ -1315,6 +1440,7 @@ function renderProjectsParent(q: string, isOpen: boolean) {
     if (open) head.classList.add("open");
     head.setAttribute("aria-expanded", String(open));
     head.title = p;
+    head.dataset.focusKey = `project:${p}`;
     const chev = document.createElement("span");
     chev.innerHTML = chevSvg();
     const name = document.createElement("span");
@@ -1360,33 +1486,8 @@ function renderProjectsParent(q: string, isOpen: boolean) {
         e.className = "project-empty";
         e.textContent = q ? "No matches in this project." : "No chats yet.";
         box.appendChild(e);
-      } else if (p === cwd) {
-        // Bounded visible window over the full session list: search filters across
-        // every session the backend returned (paths are real), paging keeps the DOM
-        // small no matter how many chats exist.
-        visibleLimit = Math.min(visibleLimit, Math.max(100, Math.ceil(list.length / 100) * 100));
-        const capped = list.slice(visibleLimit - 100, visibleLimit);
-        for (const s of capped) box.appendChild(chatButton(s, p));
-        if (list.length > 100) {
-          const nav = document.createElement("div"); nav.className = "list-empty";
-          const label = document.createElement("p"); label.textContent = `${visibleLimit - 99}–${Math.min(visibleLimit, list.length)} of ${list.length}`;
-          nav.appendChild(label);
-          for (const [text, step] of [["Previous chats", -100], ["Older chats", 100]] as const) {
-            const b = document.createElement("button"); b.type = "button"; b.className = "text-btn"; b.textContent = text;
-            b.disabled = step < 0 ? visibleLimit === 100 : visibleLimit >= list.length;
-            b.onclick = () => { visibleLimit += step; renderProjects(); chatListEl.scrollTop = 0; chatListEl.querySelector<HTMLButtonElement>(".chat-item")?.focus(); };
-            nav.appendChild(b);
-          }
-          box.appendChild(nav);
-        }
       } else {
-        for (const s of list.slice(0, 100)) box.appendChild(chatButton(s, p));
-        if (list.length > 100) {
-          const more = document.createElement("div");
-          more.className = "project-empty";
-          more.textContent = `${list.length - 100} more — refine search or open the project.`;
-          box.appendChild(more);
-        }
+        pageChats(box,list.map(info => ({info,project:p})),`project:${p}`);
       }
       section.appendChild(box);
     }
@@ -1434,6 +1535,9 @@ function renderProjectsParent(q: string, isOpen: boolean) {
       h.add(u.slug);
       prefSet("pi-hidden-projects", JSON.stringify([...h]));
       renderProjects();
+      notify({text:"Hidden unavailable chats.",retryLabel:"Undo",duration:10000,onRetry:() => {
+        const hidden = hiddenProjects(); hidden.delete(u.slug); prefSet("pi-hidden-projects",JSON.stringify([...hidden])); renderProjects();
+      }});
     };
     row.appendChild(x);
     section.appendChild(row);
@@ -1445,9 +1549,10 @@ function renderProjectsParent(q: string, isOpen: boolean) {
       e.textContent = "No chats.";
       box.appendChild(e);
     } else {
-      for (const s of list.slice(0, 100)) {
+      for (const s of list.slice(0, Math.min(100, 200 - sidebarRows))) {
+        sidebarRows++;
         const b = chatButton(s, "");
-        b.disabled = true;
+        b.querySelector<HTMLButtonElement>(".chat-item")!.disabled = true;
         b.title = "Original folder not found";
         box.appendChild(b);
       }
@@ -1459,7 +1564,7 @@ function renderProjectsParent(q: string, isOpen: boolean) {
 
 chatListEl.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-  const items = Array.from(chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item"));
+  const items = Array.from(chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item:not(:disabled)"));
   if (items.length === 0) return;
   e.preventDefault();
   const i = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -1586,8 +1691,8 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
   buttons[0]?.focus();
   menu.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeMenu(); }
-    else if (e.key === "ArrowDown") { e.preventDefault(); idx = (idx + 1) % buttons.length; buttons[idx].focus(); }
-    else if (e.key === "ArrowUp") { e.preventDefault(); idx = (idx - 1 + buttons.length) % buttons.length; buttons[idx].focus(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); idx = (buttons.indexOf(document.activeElement as HTMLButtonElement) + 1) % buttons.length; buttons[idx].focus(); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); idx = (buttons.indexOf(document.activeElement as HTMLButtonElement) - 1 + buttons.length) % buttons.length; buttons[idx].focus(); }
     else if (e.key === "ArrowRight" && document.activeElement === trigger) {
       e.preventDefault();
       const btns = sub ? Array.from(sub.querySelectorAll<HTMLButtonElement>("button")) : showSub(trigger);
@@ -1667,7 +1772,7 @@ function openNewCodedChat() {
       box.append(lab, inp);
       return inp;
     };
-    const nameInp = mkField("Name", "cc-name", "e.g. nightly-review");
+    const nameInp = mkField("Name", "cc-name", "For example, Nightly review…");
     const groupInp = mkField("Group (optional)", "cc-group", "e.g. agents");
     const mLab = document.createElement("label");
     mLab.textContent = "First message (optional)";
@@ -1689,7 +1794,7 @@ function openNewCodedChat() {
     s.className = "primary";
     s.onclick = async () => {
       const name = nameInp.value.trim();
-      if (!name) { nameInp.focus(); return; }
+      if (!name) { fieldError(nameInp,"Enter a name for this chat."); return; }
       close();
       await newCodedChat({ name, group: groupInp.value, firstMessage: msgInp.value });
     };
@@ -1882,7 +1987,7 @@ function resolveMdImages(root: ParentNode) {
     const hit = mdImgCache.get(full);
     if (hit) {
       img.src = hit;
-      img.addEventListener("click", () => img.classList.toggle("full"));
+      makeImageZoomable(img);
       continue;
     }
     void loadMdImage(img, raw, full);
@@ -1892,7 +1997,7 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
   const fallback = () => mdFallback(img, raw);
   if (/^https:\/\//i.test(full)) {
     img.src = raw;
-    img.addEventListener("click", () => img.classList.toggle("full"));
+    makeImageZoomable(img);
     img.addEventListener("error", fallback, { once: true });
     return;
   }
@@ -1910,7 +2015,7 @@ async function loadMdImage(img: HTMLImageElement, raw: string, full: string) {
     capMdImgCache();
     if (img.isConnected) {
       img.src = url;
-      img.addEventListener("click", () => img.classList.toggle("full"));
+      makeImageZoomable(img);
       img.addEventListener("error", fallback, { once: true });
     }
   } catch {
@@ -1985,7 +2090,7 @@ function assistantTextBlock(text: string, key: string, images?: { data: string; 
     img.className = "msg-img";
     img.alt = "attached image";
     img.src = `data:${im.mime};base64,${im.data}`;
-    img.addEventListener("click", () => img.classList.toggle("full"));
+    makeImageZoomable(img);
     div.appendChild(img);
   }
   const row = document.createElement("div");
@@ -2027,7 +2132,7 @@ function userBlock(text: string, images: { data: string; mime: string }[], faile
     img.className = "msg-img";
     img.alt = "attached image";
     img.src = `data:${im.mime};base64,${im.data}`;
-    img.addEventListener("click", () => img.classList.toggle("full"));
+    makeImageZoomable(img);
     col.appendChild(img);
   }
   if (failed) {
@@ -2120,7 +2225,17 @@ function openGroupPicker(anchor: HTMLElement) {
   const r = anchor.getBoundingClientRect();
   openMenu(items, { left: r.left, top: r.bottom + 6 }, "Choose groups");
 }
-function renderChatContext() { chatContextEl.replaceChildren(chatContextBar()); }
+let contextSignature = "";
+function renderChatContext() {
+  const groups = loadGroups();
+  const signature = JSON.stringify([cwd,activePath,Object.keys(groups).filter(n => activePath && groups[n].includes(activePath))]);
+  if (signature === contextSignature && chatContextEl.childElementCount) return;
+  contextSignature = signature;
+  const focused = document.activeElement as HTMLElement;
+  const index = [...chatContextEl.querySelectorAll<HTMLElement>("button")].indexOf(focused);
+  chatContextEl.replaceChildren(chatContextBar());
+  if (index >= 0) (chatContextEl.querySelectorAll<HTMLButtonElement>("button")[index] ?? inputEl).focus({preventScroll:true});
+}
 function renderSettled() {
   renderChatContext();
   if (booting || bootError) {
@@ -2141,9 +2256,10 @@ function renderSettled() {
     const row = document.createElement("div"); row.className = "empty-actions";
     for (const text of ["Explain this project", "Review recent changes"]) {
       const b = document.createElement("button"); b.type = "button"; b.textContent = text;
-      b.onclick = () => { inputEl.value = text; saveDraft(); autosize(); updateSendState(); inputEl.focus(); }; row.append(b);
+      b.onclick = () => { if (hasDraft()) { inputEl.focus(); return; } inputEl.value = text; saveDraft(); autosize(); updateSendState(); inputEl.focus(); }; row.append(b);
     }
-    d.append(h, f, row); messagesInner.append(d);
+    const tip = document.createElement("p"); tip.className = "empty-tip"; tip.textContent = "Ask a question, describe a task, or attach an image. Type $ to find a skill.";
+    d.append(h, f, tip, row); messagesInner.append(d);
   }
   const keep = new Set(list.map(b => b.key));
   for (const [key, view] of rendered) if (!keep.has(key)) { view.node.remove(); rendered.delete(key); fullTextByKey.delete(key); }
@@ -2185,6 +2301,7 @@ messagesInner.addEventListener("click", (e) => {
     if (!box) return;
     const collapsed = box.classList.toggle("json-collapsed");
     tgl.textContent = collapsed ? "Show more" : "Show less";
+    tgl.setAttribute("aria-expanded", String(!collapsed));
     return;
   }
 });
@@ -2285,7 +2402,7 @@ function renderStatus() {
   } else if (extStatus) label = extStatus;
   else label = activityLabel("idle");
   statusLine.textContent = label;
-  runSpin.classList.toggle("hidden", !streaming);
+  runSpin.classList.toggle("hidden", !streaming || dialogs.size > 0);
   runSpin.setAttribute("aria-label", streaming ? label : "Idle");
 }
 
@@ -2302,8 +2419,15 @@ function updateSendState() {
   stopBtn.disabled = stopping || !conn;
   modelSelect.disabled = !conn || streaming; thinkingSelect.disabled = !conn || streaming;
   inputEl.disabled = navigating;
+  $("btn-attach").toggleAttribute("disabled", navigating);
+  const hint = $("composer-hint");
+  hint.textContent = streaming ? "Enter steers · Queue sends after this turn · Esc stops" : "Enter sends · Shift+Enter adds a line";
+  inputEl.placeholder = streaming ? "Guide this turn, or queue a follow-up…" : "Message pi…";
+  modelSelect.title = streaming ? "Model changes are available after this turn" : modelSelect.value;
+  thinkingSelect.title = streaming ? "Thinking changes are available after this turn" : "Thinking level";
   $("btn-new").toggleAttribute("disabled", !conn);
-  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn);
+  cwdBtn.disabled = navigating;
+  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item, .chat-actions").forEach(b => b.disabled = !conn || !b.closest(".chat-row")?.querySelector<HTMLElement>(".chat-item")?.dataset.project);
   sendBtn.disabled = !ok || !conn || sendInFlight !== null;
   if (!streaming) {
     sendBtn.setAttribute("aria-label", "Send message");
@@ -2318,6 +2442,7 @@ function updateSendState() {
     queueBtn.classList.remove("hidden");
   }
   messagesInner.querySelectorAll<HTMLButtonElement>(".retry-btn").forEach(b => b.disabled = streaming || stopping || !conn || sendInFlight !== null);
+  if (sendInFlight !== null) sendBtn.title = "Sending…";
   renderStatus();
 }
 
@@ -2534,6 +2659,7 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   const box = document.createElement("div");
   box.className = "popover";
   box.setAttribute("role", "dialog");
+  box.setAttribute("aria-label", "Context usage");
   // Focusable so Esc works and Tab reaches the actions, but focusing the
   // surface itself keeps buttons from opening with a focus ring.
   box.tabIndex = -1;
@@ -2561,8 +2687,9 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   };
   document.addEventListener("mousedown", popoverOutside);
   box.addEventListener("keydown", (e) => {
+    if (e.key === "Tab") trapFocus(e, box);
     if (e.key === "Escape") {
-      e.stopPropagation();
+      e.preventDefault(); e.stopPropagation();
       closePopover();
       anchor.focus();
     }
@@ -2871,6 +2998,7 @@ async function openSession(project: string, path: string | null) {
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return; }
   if (path !== null && project === cwd && path === activePath) {
     if (unseenFinished.delete(`${project}:${path}`)) { saveUnseen(); renderProjects(); }
+    navigation.closeDrawer(); inputEl.focus();
     return;
   }
   queueSeen.set(visibleKey(), { steering: [...queue.steering], followUp: [...queue.followUp] });
@@ -2890,6 +3018,7 @@ async function openSession(project: string, path: string | null) {
     void refreshBranch();
     expandedProjects.add(project); saveExpanded();
     await refreshAllProjects();
+    navigation.closeDrawer();
     stickToBottom = true; scrollBottom(true); inputEl.focus();
   } catch (e) {
     // applyState may have retargeted before the throw: roll the scope back so
@@ -2962,15 +3091,23 @@ function dialogContext(req: PiEvent): string {
 }
 
 function showExtensionDialog(req: PiEvent) {
+  const scope = {
+    cwd: typeof req.cwd === "string" && req.cwd ? req.cwd : cwd,
+    session: typeof req.session === "string" && req.session ? req.session : (req.cwd && req.cwd !== cwd ? null : activePath),
+  };
+  const background = scope.cwd !== cwd || (activePath !== null && scope.session !== activePath);
+  const owner = sessionLabel(`${scope.cwd}:${scope.session ?? "new"}`) ?? baseName(scope.cwd);
   const method = String(req.method ?? "");
   if (!["select", "confirm", "input", "editor"].includes(method)) {
-    if (method === "notify") notify({ text: String(req.message ?? ""), kind: req.notifyType === "error" ? "error" : "info" });
+    if (method === "notify") notify({ text: `${background ? owner + ": " : ""}${String(req.message ?? "")}`, kind: req.notifyType === "error" ? "error" : "info" });
+    if (background) return;
     if (method === "setStatus") { extStatus = String(req.statusText ?? "").slice(0,120); renderStatus(); }
     if (method === "setTitle" && typeof req.title === "string") document.title = req.title;
     if (method === "set_editor_text" && typeof req.text === "string") { inputEl.value = req.text; saveDraft(); autosize(); updateSendState(); }
     return;
   }
-  const id = String(req.id ?? ""); if (!id || dialogs.has(id)) return;
+  const rawId = String(req.id ?? ""); if (!rawId) return;
+  const id = JSON.stringify([scope.cwd,scope.session,rawId]); if (dialogs.has(id)) return;
   const card = document.createElement("div");
   card.className = "dialog-card";
   card.setAttribute("role", "dialog");
@@ -2979,6 +3116,10 @@ function showExtensionDialog(req: PiEvent) {
   title.className = "dialog-title";
   title.textContent = String(req.title ?? method);
   card.appendChild(title);
+  if (background) {
+    const source = document.createElement("div"); source.className = "dialog-owner";
+    source.textContent = `Request from ${owner}`; source.title = scope.cwd; card.append(source);
+  }
   const ctx = dialogContext(req);
   if (ctx && method !== "confirm") {
     const c = document.createElement("div");
@@ -2988,6 +3129,7 @@ function showExtensionDialog(req: PiEvent) {
   }
   const state = document.createElement("div");
   state.className = "dialog-state pending hidden";
+  state.setAttribute("role", "status");
 
 
   const cancelBtn = (label: string) => {
@@ -3079,7 +3221,7 @@ function showExtensionDialog(req: PiEvent) {
       respondUi(id, { cancelled: true });
     }
   });
-  dialogs.set(id, {id, card, inFlight: false});
+  dialogs.set(id, {id:rawId, scope, card, inFlight: false});
   dialogSlot.appendChild(card);
   syncDialogs();
   renderStatus();
@@ -3091,8 +3233,8 @@ function syncDialogs() {
   let first = true;
   for (const d of dialogs.values()) { d.card.classList.toggle("hidden", !first); first = false; }
   const next = dialogs.values().next().value as UiDialog | undefined;
-  if (next && next.id !== visibleDialogId) next.card.querySelector<HTMLElement>("input, textarea, button")?.focus({preventScroll:true});
-  visibleDialogId = next?.id ?? null;
+  if (next && JSON.stringify([next.scope,next.id]) !== visibleDialogId) next.card.querySelector<HTMLElement>("input, textarea, button")?.focus({preventScroll:true});
+  visibleDialogId = next ? JSON.stringify([next.scope,next.id]) : null;
 }
 async function respondUi(id: string, payload: Record<string, unknown>) {
   const d = dialogs.get(id); if (!d || d.inFlight) return;
@@ -3102,10 +3244,10 @@ async function respondUi(id: string, payload: Record<string, unknown>) {
   const st = d.card.querySelector<HTMLElement>(".dialog-state")!;
   st.className = "dialog-state pending"; st.textContent = "Responding…";
   try {
-    await invokeScoped("pi_ui_response", {id, payload});
+    await invokeChecked("pi_ui_response", {...d.scope,id:d.id,payload});
     if (dialogs.get(id) !== d) return;
     dialogs.delete(id); d.card.remove(); syncDialogs(); renderStatus();
-    if (!dialogs.size) inputEl.focus();
+    if (!dialogs.size && !modalRoot.childElementCount) inputEl.focus();
   } catch (e) {
     if (dialogs.get(id) !== d) return;
     st.className = "dialog-state error"; st.textContent = `Couldn't send response: ${String(e)} `;
@@ -3150,7 +3292,13 @@ async function handleEvent(p: PiEvent) {
     // One chat's process died (crash or lazy reaping). Visible chat: reconnect
     // path. Background chat: note it; reopening respawns transparently.
     const key = eventRowKey(p);
-    if (key !== null) { queueCache.delete(key); queueSeen.delete(key); }
+    if (key !== null) {
+      queueCache.delete(key); queueSeen.delete(key);
+      for (const [dialogKey,d] of dialogs) {
+        if (`${d.scope.cwd}:${d.scope.session}` === key) { d.card.remove(); dialogs.delete(dialogKey); }
+      }
+      syncDialogs(); renderStatus();
+    }
     if (key !== null && key === visibleKey()) {
       ++bootGen; booting = false; setBusy(false); runningSet.clear(); bootError = "pi process for this chat exited. Reconnect to continue; your draft is kept.";
       saveDraft(); dialogs.clear(); dialogSlot.replaceChildren(); renderSettled(); updateSendState();
@@ -3365,6 +3513,8 @@ function skillPopOpen(): boolean {
   return !skillPopEl.classList.contains("hidden");
 }
 function hideSkillPop() {
+  inputEl.setAttribute("aria-expanded", "false");
+  inputEl.removeAttribute("aria-activedescendant");
   skillPopEl.classList.add("hidden");
   skillPopEl.replaceChildren();
   skillMatches = []; skillFocus = 0; skillAnchor = -1; skillSig = "";
@@ -3400,10 +3550,13 @@ function updateSkillPop() {
 }
 function renderSkillPop() {
   skillPopEl.replaceChildren();
+  inputEl.setAttribute("aria-expanded", "true");
+  inputEl.setAttribute("aria-activedescendant", `skill-option-${skillFocus}`);
   skillMatches.forEach((s, i) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "menu-item" + (i === skillFocus ? " focused" : "");
+    b.id = `skill-option-${i}`; b.tabIndex = -1;
     b.setAttribute("role", "option");
     b.setAttribute("aria-selected", String(i === skillFocus));
     const name = document.createElement("span");
@@ -3447,7 +3600,7 @@ inputEl.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") { e.preventDefault(); skillFocus = (skillFocus + 1) % skillMatches.length; renderSkillPop(); return; }
     if (e.key === "ArrowUp") { e.preventDefault(); skillFocus = (skillFocus - 1 + skillMatches.length) % skillMatches.length; renderSkillPop(); return; }
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); acceptSkill(); return; }
-    if (e.key === "Escape") { e.preventDefault(); hideSkillPop(); return; }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); hideSkillPop(); return; }
   }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
@@ -3487,6 +3640,13 @@ function setTheme(theme: "light" | "dark", persist: boolean) {
   }
   applyThemeLabel();
 }
+function setThemePreference(preference: "system" | "light" | "dark") {
+  document.documentElement.dataset.themePreference = preference;
+  if (preference === "system") {
+    try { localStorage.removeItem("pi-theme"); } catch { /* session-only */ }
+    setTheme(matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light", false);
+  } else setTheme(preference, true);
+}
 themeBtn.onclick = () => {
   setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
 };
@@ -3499,12 +3659,33 @@ applyThemeLabel();
 
 // ---------- header actions ----------
 ($("btn-new") as HTMLButtonElement).onclick = newChat;
+const imagePicker = $("image-picker") as HTMLInputElement;
+$("btn-attach").onclick = () => imagePicker.click();
+imagePicker.onchange = () => { if (imagePicker.files) addImageFiles(imagePicker.files); imagePicker.value = ""; inputEl.focus(); };
 
 
 // ---------- sidebar resize: drag the edge, double-click resets ----------
 const sidebarEl = $("sidebar");
 const sideGrip = $("side-grip");
 const SIDE_W_MIN = 200, SIDE_W_MAX = 480;
+const maxSidebarWidth = () => Math.max(SIDE_W_MIN, Math.min(SIDE_W_MAX, innerWidth - 400));
+function syncSidebarWidth() {
+  sideGrip.setAttribute("aria-valuenow",String(Math.max(SIDE_W_MIN,Math.round(sidebarEl.getBoundingClientRect().width) || Number(prefGet("pi-sidebar-w")) || 240)));
+  sideGrip.setAttribute("aria-valuemax",String(maxSidebarWidth()));
+}
+function resetSidebarWidth() {
+  sidebarEl.style.width = "";
+  try { localStorage.removeItem("pi-sidebar-w"); } catch { /* session-only */ }
+  syncSidebarWidth();
+}
+sideGrip.addEventListener("keydown", e => {
+  if (e.key === "Home" || e.key === "Enter") { e.preventDefault(); resetSidebarWidth(); return; }
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  e.preventDefault();
+  const width = sidebarEl.getBoundingClientRect().width + (e.key === "ArrowRight" ? 1 : -1) * (e.shiftKey ? 40 : 10);
+  sidebarEl.style.width = `${Math.max(SIDE_W_MIN,Math.min(maxSidebarWidth(),width))}px`;
+  prefSet("pi-sidebar-w",String(Math.round(sidebarEl.getBoundingClientRect().width))); syncSidebarWidth();
+});
 try {
   const w = Number(prefGet("pi-sidebar-w"));
   if (Number.isFinite(w) && w > 0) {
@@ -3524,8 +3705,9 @@ sideGrip.addEventListener("pointerdown", (e) => {
   const startX = e.clientX;
   const startW = sidebarEl.getBoundingClientRect().width;
   const move = (ev: PointerEvent) => {
-    const w = Math.min(SIDE_W_MAX, Math.max(SIDE_W_MIN, startW + ev.clientX - startX));
+    const w = Math.min(maxSidebarWidth(), Math.max(SIDE_W_MIN, startW + ev.clientX - startX));
     sidebarEl.style.width = `${w}px`;
+    syncSidebarWidth();
   };
   const up = () => {
     sideGrip.removeEventListener("pointermove", move);
@@ -3540,14 +3722,9 @@ sideGrip.addEventListener("pointerdown", (e) => {
   sideGrip.addEventListener("pointerup", up, { once: true });
   sideGrip.addEventListener("pointercancel", up, { once: true });
 });
-sideGrip.addEventListener("dblclick", () => {
-  sidebarEl.style.width = "";
-  try {
-    localStorage.removeItem("pi-sidebar-w");
-  } catch {
-    /* ignore */
-  }
-});
+sideGrip.addEventListener("dblclick", resetSidebarWidth);
+window.addEventListener("resize", syncSidebarWidth);
+syncSidebarWidth();
 cwdBtn.onclick = () => openSettings();
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
 
@@ -3573,21 +3750,26 @@ thinkingSelect.onchange = async () => {
 };
 
 searchEl.addEventListener("input", () => {
+  $("btn-clear-search").classList.toggle("hidden", !searchEl.value);
   if (debounceT) window.clearTimeout(debounceT);
   debounceT = window.setTimeout(() => {
     filter = searchEl.value;
-    visibleLimit = 100;
+    sectionPages.delete("search");
     renderProjects();
   }, 150);
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+  if (modalRoot.childElementCount || menuRoot.childElementCount || popoverEl) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === "\\") { e.preventDefault(); navigation.toggle(); return; }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
     e.preventDefault();
     newChat();
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
+    navigation.show();
     searchEl.focus();
     searchEl.select();
   }
@@ -3602,7 +3784,7 @@ document.addEventListener("keydown", (e) => {
       closeMenu();
       return;
     }
-    if (dialogs.size) { e.preventDefault(); const first = dialogs.values().next().value as UiDialog; void respondUi(first.id, {cancelled:true}); return; }
+    if (dialogs.size) { e.preventDefault(); const firstKey = dialogs.keys().next().value as string; void respondUi(firstKey, {cancelled:true}); return; }
     if (streaming && !stopping && document.activeElement !== inputEl) {
       e.preventDefault();
       doAbort();
