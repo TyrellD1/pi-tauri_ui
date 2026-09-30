@@ -10,6 +10,8 @@ Grayscale, minimal-footprint Tauri UI for the [pi coding agent](https://github.c
 - Left: chat list. Middle: chat. Nothing else shouting.
 - Guiding principles live in [AGENTS.md](./AGENTS.md): clean UI/UX, minimal hardware utilization (no polling, event-driven, <300KB frontend).
 
+The [subagents research and implementation plan](./docs/subagents-plan.html) explains Pi's extension conventions and proposes persistent child sessions, inline navigation, live inspection, and scoped controls. It is a standalone offline HTML document with an interactive UI mockup; subagent support is planned.
+
 ## Run
 
 Prereqs: Node 18+, Rust stable, `pi` on PATH.
