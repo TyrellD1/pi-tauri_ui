@@ -8,6 +8,7 @@ let cwd = '/projects/pi-tauri_ui', path = '/preview/chats/chat-0.jsonl', running
 let nextId = 0, listenAttempts = 0;
 let rejectNext = false, holdSend: (() => void) | null = null, holdResponse: (() => void) | null = null;
 let failNavigation = false;
+let delayNewChat = false, releaseNewChat: (() => void) | null = null;
 let failResponse = false, calls: {cmd: string; args?: Record<string, unknown>}[] = [];
 let createdSessions: {path:string;id:string;name:string|null;preview:string;mtime:number;messageCount:number}[] = [];
 let queued: string[] = [];
@@ -90,6 +91,7 @@ export function installPreview() {
       if(cmd === 'pi_get_commands') return {commands:[{name:'skill:image-gen',description:'Generate images from a prompt',source:'skill',location:'user'},{name:'skill:improve-prompt',description:'Refine a rough prompt',source:'skill',location:'project'}]};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
       if(cmd === 'pi_new_chat') {
+        if(delayNewChat) { delayNewChat=false; await new Promise<void>(resolve=>releaseNewChat=resolve); releaseNewChat=null; }
         path=`/preview/new-${++nextId}.jsonl`;
         createdSessions.unshift({path,id:`new-${nextId}`,name:null,preview:'New chat',mtime:Date.now(),messageCount:0});
         resetData(); return {success:true,path};
@@ -227,6 +229,25 @@ export function installPreview() {
       const image=$('messages-inner').querySelector<HTMLImageElement>('.msg-img')!;key(image,'Enter');
       check('attached images zoom by keyboard',image.classList.contains('full') && image.getAttribute('aria-expanded')==='true');
       key(image,' ');check('image keyboard toggle shrinks again',!image.classList.contains('full'));
+      $('chat-context').querySelector<HTMLButtonElement>('button')!.click();await sleep(70);
+      const picker=$('modal-root');const folderSearch=picker.querySelector<HTMLInputElement>('[aria-label="Search folders or type a path"]')!;
+      check('folder picker has a clear empty-folder state',picker.textContent!.includes('No subfolders here') && !findButton(picker,'Start chat here').disabled);
+      folderSearch.value='/missing';key(folderSearch,'Enter');await sleep(60);
+      check('folder failure keeps the last valid folder selectable',picker.textContent!.includes('Check the path') && !findButton(picker,'Start chat here').disabled);
+      // A request arriving behind Settings takes focus after Settings closes.
+      findButton(picker,'Cancel').click();$('btn-settings').click();
+      emit({type:'extension_ui_request',method:'confirm',id:'late',title:'Request behind settings',message:'Please answer after closing Settings.'});
+      findButton($('modal-root'),'Cancel').click();await sleep(30);
+      check('closing settings focuses a waiting request',$('dialog-slot').contains(document.activeElement));
+      findButton($('dialog-slot'),'No').click();await sleep(50);
+      const createsBefore=calls.filter(c=>c.cmd==='pi_new_chat').length;delayNewChat=true;
+      $('btn-new').click();await sleep(20);
+      check('new chat shows immediate pending feedback',$<HTMLButtonElement>('btn-new').disabled && $('btn-new').textContent!.includes('Creating'));
+      $('btn-new').click();$('chat-list').querySelector<HTMLButtonElement>('.p-add')?.click();
+      check('repeated new-chat actions create one session',calls.filter(c=>c.cmd==='pi_new_chat').length===createsBefore+1);
+      releaseNewChat?.();await sleep(100);
+
+
       result.textContent=report.join('\n')+`\n\n${report.length} UX checks passed.`;
     } catch(e) {result.textContent=report.join('\n')+`\nSTOPPED: ${String(e)}`;}
     finally {

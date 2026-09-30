@@ -77,6 +77,7 @@ try {
 }
 const conversation = new Conversation();
 let messages: AgentMessage[] = conversation.messages;
+let creatingChat = false;
 let streaming = false, stopping = false, booting = true, bootError: string | null = null;
 let bootGen = 0, revision = 0, navigating = false, eventsReady = false;
 let unlisten: (() => void) | null = null;
@@ -364,6 +365,7 @@ let modalPrevFocus: HTMLElement | null = null;
 function closeModal() {
   modalRoot.innerHTML = "";
   navigation.sync();
+  if (dialogs.size) { modalPrevFocus = null; dialogs.values().next().value?.card.querySelector<HTMLElement>("input, textarea, button")?.focus(); return; }
   if (modalPrevFocus && document.contains(modalPrevFocus)) {
     modalPrevFocus.focus();
     modalPrevFocus = null;
@@ -916,7 +918,7 @@ function openProjectPickerModal(startDir: string, selectLabel: string, onPick: (
           cache.set(path, d);
         } catch (e) {
           if (gen !== navGen || !box.isConnected) return;
-          err.textContent = typeof e === "string" && e ? e : e instanceof Error ? e.message : "Couldn't list that folder.";
+          err.textContent = `Couldn’t open this folder. Check the path or choose Browse in Finder. ${typeof e === "string" ? e : e instanceof Error ? e.message : ""}`;
           const back = cache.get(cur);
           if (back) { renderList(back, search.value); select.disabled = false; }
           else {
@@ -1062,7 +1064,7 @@ function chatButton(s: SessionInfo, project: string): HTMLElement {
   sub.textContent = s.preview.slice(0, 80);
   el.appendChild(row);
   if (s.name && s.preview && s.preview !== s.name) el.appendChild(sub);
-  el.disabled = navigating || booting;
+  el.disabled = navigating || booting || creatingChat || !!bootError;
   el.title = `${s.name || s.preview || "Untitled"} · ${new Date(s.mtime).toLocaleString()}`;
   el.dataset.focusKey = `chat:${project}:${s.path}`;
   el.onclick = () => openChat(project, s.path);
@@ -1729,7 +1731,7 @@ function removeFromGroup(name: string, path: string) {
 async function newCodedChat(opts: { name: string; group?: string; firstMessage?: string }): Promise<string | null> {
   const name = opts.name.trim();
   if (!name) return null;
-  if (navigating || booting || sendInFlight) { notify({ text: "One moment — try again when idle." }); return null; }
+  if (navigating || booting || sendInFlight || creatingChat) { notify({ text: "One moment — try again when idle." }); return null; }
   if (dialogs.size) { notify({ text: "Answer the pending request before creating a chat." }); return null; }
   const first = opts.firstMessage?.trim();
   let path: string;
@@ -2393,6 +2395,7 @@ function renderStatus() {
   let label: string;
   if (booting) label = "Connecting…";
   else if (bootError) label = "Disconnected";
+  else if (creatingChat) label = "Starting a new chat…";
   else if (navigating) label = "Switching workspace…";
   else if (stopping) label = activityLabel("stopping");
   else if (dialogs.size > 0) label = activityLabel("waiting");
@@ -2414,7 +2417,7 @@ function updateSendState() {
   const ok = canSend({ streaming, stopping, hasText: inputEl.value.trim().length > 0, hasImages: pendingImages.length > 0 });
   // No sending while booting/disconnected, and never a second submit while a
   // send round-trip is still in flight (acceptance != completion).
-  const conn = !booting && !bootError && !navigating;
+  const conn = !booting && !bootError && !navigating && !creatingChat;
   queueBtn.disabled = !ok || !conn || sendInFlight !== null;
   stopBtn.disabled = stopping || !conn;
   modelSelect.disabled = !conn || streaming; thinkingSelect.disabled = !conn || streaming;
@@ -2426,7 +2429,9 @@ function updateSendState() {
   modelSelect.title = streaming ? "Model changes are available after this turn" : modelSelect.value;
   thinkingSelect.title = streaming ? "Thinking changes are available after this turn" : "Thinking level";
   $("btn-new").toggleAttribute("disabled", !conn);
-  cwdBtn.disabled = navigating;
+  $("btn-new").querySelector("span")!.textContent = creatingChat ? "Creating…" : "New chat";
+  chatListEl.querySelectorAll<HTMLButtonElement>(".p-add").forEach(b => b.disabled = !conn);
+  cwdBtn.disabled = navigating || creatingChat;
   chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item, .chat-actions").forEach(b => b.disabled = !conn || !b.closest(".chat-row")?.querySelector<HTMLElement>(".chat-item")?.dataset.project);
   sendBtn.disabled = !ok || !conn || sendInFlight !== null;
   if (!streaming) {
@@ -2905,7 +2910,7 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
     disarmWatchdog();
   }
 }
-function canSubmit() { return !booting && !bootError && !navigating && !stopping && !sendInFlight && hasDraft(); }
+function canSubmit() { return !booting && !bootError && !navigating && !creatingChat && !stopping && !sendInFlight && hasDraft(); }
 async function doSend() { if (!canSubmit()) return; await submit(takeDraft(), streaming ? "steer" : "prompt"); }
 async function doSteer() { if (!canSubmit()) return; await submit(takeDraft(), streaming ? "steer" : "prompt"); }
 async function doFollowUp() { if (!canSubmit()) return; await submit(takeDraft(), streaming ? "follow_up" : "prompt"); }
@@ -2991,7 +2996,7 @@ function renderQueue() {
 // the scope to the right process (spawning/switching inside it) and returns
 // that session as truth. Running turns elsewhere keep streaming.
 async function openSession(project: string, path: string | null) {
-  if (navigating || booting || sendInFlight) {
+  if (navigating || booting || sendInFlight || creatingChat) {
     if (sendInFlight) notify({ text: "Sending your message — one moment, then click again." });
     return;
   }
@@ -3031,16 +3036,17 @@ async function openSession(project: string, path: string | null) {
 }
 async function newChat() { await newChatInProject(cwd); }
 async function newChatInProject(project: string): Promise<string | null> {
-  if (navigating || booting || sendInFlight) return null;
+  if (navigating || booting || sendInFlight || creatingChat) return null;
   if (dialogs.size) { notify({text: "Answer the pending request before changing chats or folders."}); return null; }
   let path: string;
+  creatingChat = true; updateSendState();
   try {
     const r = await invokeChecked<{ path: string }>("pi_new_chat", { cwd: project });
     path = r.path;
   } catch (e) {
     notify({ text: `Couldn't start a new chat: ${String(e)}`, kind: "error", sticky: true });
     return null;
-  }
+  } finally { creatingChat = false; updateSendState(); }
   await openSession(project, path);
   return path;
 }
