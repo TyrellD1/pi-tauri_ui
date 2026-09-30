@@ -19,11 +19,13 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <a class="skip-link" href="#input">Skip to message</a>
     <div id="app">
       <aside id="sidebar" aria-label="Chats">
         <div class="side-top">
+          <button id="btn-close-sidebar" class="icon-action" type="button" aria-label="Hide chats" title="Hide chats (⌘\)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6"/></svg></button>
           <div class="brand">
-            <div class="brand-mark" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><path fill="#F09082" d="M165.29 165.29H517.36V400H400V282.65H165.29Z"/><path fill="#4D9ABF" d="M165.29 282.65H282.65V400H400V517.36H282.65V634.72H165.29Z"/><path fill="#F1BE58" d="M517.36 400H634.72V634.72H517.36Z"/></svg></div>
+            <div class="brand-mark" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800"><path fill="currentColor" d="M165.29 165.29H517.36V400H400V282.65H165.29Z"/><path fill="currentColor" d="M165.29 282.65H282.65V400H400V517.36H282.65V634.72H165.29Z"/><path fill="currentColor" d="M517.36 400H634.72V634.72H517.36Z"/></svg></div>
             <div class="brand-text">
               <div class="brand-name">pi</div>
               <button id="btn-cwd" class="folder-btn" type="button" title="">
@@ -40,10 +42,11 @@
           </button>
         </div>
         <div class="search-wrap">
-          <input id="search" placeholder="Search chats" autocomplete="off" spellcheck="false" aria-label="Search chats" />
+          <input id="search" type="search" name="chat-search" placeholder="Search chats…" autocomplete="off" spellcheck="false" aria-label="Search chats" />
+          <button id="btn-clear-search" class="clear-search hidden" type="button" aria-label="Clear search">×</button>
           <kbd class="search-hint" aria-hidden="true">⌘K</kbd>
         </div>
-        <div id="chat-list" class="chat-list" role="list" aria-label="Projects and conversations"></div>
+        <div id="chat-list" class="chat-list" aria-label="Projects and conversations"></div>
         <div class="side-foot">
           <div id="conn-error" class="conn-error hidden" role="alert"></div>
           <button id="btn-settings" class="settings-btn" type="button" title="Settings (⌘,)">
@@ -51,10 +54,12 @@
             <span>Settings</span>
           </button>
         </div>
-        <div id="side-grip" title="Drag to resize the sidebar (double-click to reset)"></div>
+        <div id="side-grip" role="separator" tabindex="0" aria-label="Sidebar width" aria-orientation="vertical" aria-valuemin="200" aria-valuemax="480" aria-valuenow="240" title="Drag or use arrow keys to resize. Home resets."></div>
       </aside>
+      <button id="sidebar-backdrop" class="sidebar-backdrop hidden" type="button" tabindex="-1" aria-label="Close chats"></button>
       <main id="main">
         <header id="chat-header">
+          <button id="btn-sidebar" class="icon-action" type="button" aria-controls="sidebar" aria-expanded="true" aria-label="Hide chats" title="Toggle chats (⌘\)"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg></button>
           <div class="chat-title-wrap">
             <h1 id="chat-title">New chat</h1>
           </div>
@@ -69,9 +74,10 @@
           </div>
         </header>
         <div id="notices" aria-live="polite"></div>
-        <div id="messages" class="messages" tabindex="-1"><div id="messages-inner" class="messages-inner"></div></div>
-        <button id="jump-latest" class="jump-latest hidden" type="button">Jump to latest ↓</button>
+        <div id="messages" class="messages" role="region" aria-label="Conversation" tabindex="-1"><div id="messages-inner" class="messages-inner"></div></div>
+
         <div id="composer-wrap">
+          <button id="jump-latest" class="jump-latest hidden" type="button">Jump to latest ↓</button>
           <div id="queue-bar" class="queue-bar hidden"></div>
           <div id="skill-pop" class="skill-pop hidden" role="listbox" aria-label="Skills"></div>
           <div id="dialog-slot"></div>
@@ -79,7 +85,9 @@
           <div id="attach-error" class="attach-error hidden" role="alert"></div>
           <div id="chat-context"></div>
           <div class="composer">
-            <textarea id="input" rows="1" placeholder="Message pi…" aria-label="Message pi"></textarea>
+            <button id="btn-attach" class="attach-btn" type="button" aria-label="Attach images" title="Attach images. You can also paste or drop them."><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 13 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l8-8M6 15l8-8"/></svg></button>
+            <input id="image-picker" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden />
+            <textarea id="input" name="message" autocomplete="off" aria-describedby="composer-hint" aria-controls="skill-pop" aria-expanded="false" aria-autocomplete="list" rows="1" placeholder="Message pi…" aria-label="Message pi"></textarea>
             <button id="btn-queue" class="composer-btn secondary hidden" type="button" title="Send after this turn (follow-up)" aria-label="Queue as follow-up, sent after this turn">
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
             </button>
@@ -101,11 +109,11 @@
                 <option value="low">Low</option>
                 <option value="medium" selected>Medium</option>
                 <option value="high">High</option>
-                <option value="xhigh">xhigh</option>
-                <option value="max">max</option>
+                <option value="xhigh">Extra high</option>
+                <option value="max">Maximum</option>
               </select>
             </label>
-            <span class="composer-hint" title="Enter sends · Shift+Enter adds a line · Esc stops">Enter sends · ⇧↵ newline · Esc stops</span>
+            <span id="composer-hint" class="composer-hint" title="Enter sends · Shift+Enter adds a line · Esc stops">Enter sends · ⇧↵ newline · Esc stops</span>
           </div>
           <div class="composer-foot">
             <span id="run-spin" class="run-spin hidden" role="img" aria-label="Working"></span>

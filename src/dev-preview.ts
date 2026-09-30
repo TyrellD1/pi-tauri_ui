@@ -8,6 +8,7 @@ let cwd = '/projects/pi-tauri_ui', path = '/preview/chats/chat-0.jsonl', running
 let nextId = 0, listenAttempts = 0;
 let rejectNext = false, holdSend: (() => void) | null = null, holdResponse: (() => void) | null = null;
 let failNavigation = false;
+let delayNewChat = false, releaseNewChat: (() => void) | null = null;
 let failResponse = false, calls: {cmd: string; args?: Record<string, unknown>}[] = [];
 let createdSessions: {path:string;id:string;name:string|null;preview:string;mtime:number;messageCount:number}[] = [];
 let queued: string[] = [];
@@ -79,6 +80,10 @@ export function installPreview() {
         else if(reqCwd) { cwd=reqCwd; }
         return {cwd,sessionFile:path,sessionName:scenario === 'Populated'?'Refine the chat interface':'New chat',thinkingLevel:'xhigh',isStreaming:running,model:{provider:'opencode-go',id:'muse-spark-1.3-contributor'}};
       }
+      if(cmd === 'pi_list_dirs') {
+        const dir=String(args?.path ?? cwd);if(dir==='/missing') throw new Error('Folder not found');
+        return {path:dir,parent:dir==='/'?null:dir.slice(0,dir.lastIndexOf('/')) || '/',home:'/Users/preview',dirs:dir==='/'?['/projects','/Users']:dir==='/projects'?['/projects/pi-tauri_ui','/projects/other']:[],truncated:false};
+      }
       if(cmd === 'pi_get_messages') return {messages:clone(fixture.messages)};
       if(cmd === 'pi_list_sessions') return {sessions:previewSessions(),active:path};
       if(cmd === 'pi_all_projects') return {projects:[{slug:'--projects-pi-tauri_ui--',cwd,latest:Date.now(),sessions:previewSessions()}]};
@@ -86,6 +91,7 @@ export function installPreview() {
       if(cmd === 'pi_get_commands') return {commands:[{name:'skill:image-gen',description:'Generate images from a prompt',source:'skill',location:'user'},{name:'skill:improve-prompt',description:'Refine a rough prompt',source:'skill',location:'project'}]};
       if(cmd === 'pi_get_stats') return {tokens:{input:2400,output:600,total:3000},cost:0.012};
       if(cmd === 'pi_new_chat') {
+        if(delayNewChat) { delayNewChat=false; await new Promise<void>(resolve=>releaseNewChat=resolve); releaseNewChat=null; }
         path=`/preview/new-${++nextId}.jsonl`;
         createdSessions.unshift({path,id:`new-${nextId}`,name:null,preview:'New chat',mtime:Date.now(),messageCount:0});
         resetData(); return {success:true,path};
@@ -129,8 +135,128 @@ export function installPreview() {
   // for a deterministic run.
   button('Reset preview state',()=>{ for(const k of Object.keys(localStorage)) if(k.startsWith('pi-')) localStorage.removeItem(k); location.reload(); });
   const run=button('Run UI regression',()=>void runRegression());
+  const uxRun=button('Run UX audit checks',()=>void runUXRegression());
   const result=document.createElement('pre'); result.id='dev-results';result.style.cssText='white-space:pre-wrap;font:11px/1.5 var(--font)';panel.append(result);
   document.body.append(panel);
+  async function runUXRegression() {
+    uxRun.disabled=true;run.disabled=true; result.textContent='Running UX checks…'; const report:string[]=[];
+    const check=(name:string,ok:boolean)=>{report.push(`${ok?'PASS':'FAIL'} ${name}`);result.textContent=report.join('\n');if(!ok)throw new Error(name);};
+    const key=(el:HTMLElement,key:string,extra:KeyboardEventInit={})=>el.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true,...extra}));
+    const findButton=(root:HTMLElement,label:string)=>Array.from(root.querySelectorAll<HTMLButtonElement>('button')).find(b=>b.textContent===label)!;
+    const originalGroups=localStorage.getItem('pi-chat-groups'), originalParents=localStorage.getItem('pi-parents');
+    try {
+      await loadScenario('Empty');type('My unfinished question');
+      $('messages-inner').querySelector<HTMLButtonElement>('.empty-actions button')!.click();
+      check('starter keeps an existing draft',$<HTMLTextAreaElement>('input').value==='My unfinished question');
+      $('btn-settings').click();const modal=$('modal-root').querySelector<HTMLElement>('.modal')!;
+      check('modal makes both background panels inert',$('main').inert && $('sidebar').inert);
+      const beforeNew=calls.filter(c=>c.cmd==='pi_new_chat').length;key(modal,'n',{metaKey:true});
+      check('global new-chat shortcut cannot leave a modal',calls.filter(c=>c.cmd==='pi_new_chat').length===beforeNew);
+      $<HTMLInputElement>('m-cwd').value='';findButton(modal,'Save').click();
+      check('empty project path stays open with field error',$('modal-root').contains(modal) && $('m-cwd').getAttribute('aria-invalid')==='true');
+      const theme=$<HTMLSelectElement>('m-theme');theme.value='dark';theme.dispatchEvent(new Event('change'));
+      check('dark preference updates theme and toggle',document.documentElement.dataset.theme==='dark' && $('btn-theme').getAttribute('aria-label')==='Switch to light theme');
+      theme.value='system';theme.dispatchEvent(new Event('change'));
+      check('system preference removes manual override',localStorage.getItem('pi-theme')===null && document.documentElement.dataset.themePreference==='system');
+      const save=findButton(modal,'Save');save.focus();key(save,'Tab');
+      check('Tab wraps within modal',document.activeElement===$('m-cwd'));
+      findButton(modal,'Cancel').click();await sleep();
+      check('closing modal restores background access',!$('main').inert && (!$('sidebar').inert || matchMedia('(max-width:760px)').matches));
+      if($('app').dataset.sidebar==='closed')$('btn-sidebar').click();
+      $('chat-list').querySelector<HTMLButtonElement>('[aria-label="New group"]')!.click();
+      const groupModal=$('modal-root');findButton(groupModal,'Create').click();
+      check('empty group name stays open with a field error',$('m-group').getAttribute('aria-invalid')==='true');
+      $<HTMLInputElement>('m-group').value='UX audit group';findButton(groupModal,'Create').click();await sleep();
+      const group=$('chat-list').querySelector<HTMLElement>('[data-group="UX audit group"]')!;
+      group.querySelector<HTMLButtonElement>('.p-x')!.click();
+      check('group deletion provides Undo',!!Array.from($('notices').querySelectorAll('button')).find(b=>b.textContent==='Undo'));
+      findButton($('notices'),'Undo').click();
+      check('Undo restores the group',!!$('chat-list').querySelector('[data-group="UX audit group"]'));
+      // A real large group must page, and the entire sidebar must stay bounded.
+      const all=previewSessions().map(s=>s.path);localStorage.setItem('pi-chat-groups',JSON.stringify({'Large audit group':all}));
+      typeSearch('temporary');await sleep(180);typeSearch('');await sleep(180);
+      check('all sidebar sections share a 200-chat cap',$('chat-list').querySelectorAll('.chat-item').length<=200);
+      let large=$('chat-list').querySelector<HTMLElement>('[data-group="Large audit group"]')!;
+      check('large groups have page controls',large.querySelectorAll('.chat-item').length===100 && !!findButton(large,'Older chats'));
+      findButton(large,'Older chats').click();large=$('chat-list').querySelector<HTMLElement>('[data-group="Large audit group"]')!;
+      check('paging reaches older group chats',large.querySelector<HTMLButtonElement>('.chat-item')?.dataset.path===all[100]);
+      localStorage.setItem('pi-parents',JSON.stringify({recent:false,groups:false,projects:false}));
+      typeSearch('Archived keyboard review');await sleep(180);
+      check('search reaches chats with every section closed',$('chat-list').querySelector('.chat-item')?.textContent?.includes('Archived keyboard review')===true);
+      const resultRow=$('chat-list').querySelector<HTMLElement>('.chat-item')!;resultRow.focus();const focusKey=resultRow.dataset.focusKey;
+      emit({type:'agent_start'});await sleep(70);
+      check('sidebar refresh keeps the focused chat',(document.activeElement as HTMLElement).dataset.focusKey===focusKey);
+      const aborts=calls.filter(c=>c.cmd==='pi_abort').length;
+      const search=$<HTMLInputElement>('search');search.focus();key(search,'Escape');
+      check('search Escape clears only the search',search.value==='' && calls.filter(c=>c.cmd==='pi_abort').length===aborts);
+      // Keep the context button focused while the real streaming path updates prose.
+      assistantStart();await sleep(70);
+      const context=$('chat-context').querySelector<HTMLElement>('button')!;context.focus();
+      delta('text_delta',0,{delta:'A streamed update.'});await sleep(70);
+      check('streaming keeps the context control and focus',context===$('chat-context').querySelector('button') && document.activeElement===context);
+      type('$image');await sleep(50);const input=$<HTMLTextAreaElement>('input');
+      check('skill suggestions expose the active option',input.getAttribute('aria-expanded')==='true' && !!document.getElementById(input.getAttribute('aria-activedescendant')!));
+      key(input,'Escape');
+      check('skill Escape does not stop the turn',input.getAttribute('aria-expanded')==='false' && calls.filter(c=>c.cmd==='pi_abort').length===aborts);
+      finish();await sleep(70);
+      // Different processes can reuse a dialog id. Background editor/status events must not change this chat.
+      const activeTitle=$('chat-title').textContent;type('Visible draft');
+      const away=(event:Record<string,unknown>)=>listener?.({payload:{...event,cwd:'/projects/background',session:'/preview/background.jsonl'}});
+      away({type:'extension_ui_request',method:'set_editor_text',text:'Wrong draft'});
+      away({type:'extension_ui_request',method:'setTitle',title:'Wrong title'});
+      check('background extension updates keep visible title and draft',$<HTMLTextAreaElement>('input').value==='Visible draft' && $('chat-title').textContent===activeTitle);
+      away({type:'extension_ui_request',method:'confirm',id:'same-id',title:'Background permission',message:'Run a background command?'});
+      emit({type:'extension_ui_request',method:'confirm',id:'same-id',title:'Visible permission',message:'Run here?'});
+      check('dialog ids are unique per owning chat',$('dialog-slot').children.length===2 && $('dialog-slot').textContent!.includes('Request from'));
+      findButton($('dialog-slot'),'No').click();await sleep(60);
+      const response=[...calls].reverse().find(c=>c.cmd==='pi_ui_response');
+      check('background response uses the requesting chat',response?.args?.cwd==='/projects/background' && response?.args?.session==='/preview/background.jsonl' && response?.args?.id==='same-id');
+      findButton($('dialog-slot'),'No').click();await sleep(60);
+      check('visible request survives the background response',$('dialog-slot').children.length===0);
+      if(!matchMedia('(max-width:760px)').matches) {
+        const grip=$('side-grip');const old=Number(grip.getAttribute('aria-valuenow'));grip.focus();key(grip,'ArrowRight');
+        check('sidebar resizes from the keyboard',Number(grip.getAttribute('aria-valuenow'))>old);key(grip,'Home');
+      }
+      // Switching back to ordinary groups does not lose a searchable chat.
+      if(originalGroups===null)localStorage.removeItem('pi-chat-groups');else localStorage.setItem('pi-chat-groups',originalGroups);
+      localStorage.setItem('pi-parents',JSON.stringify({recent:false,groups:true,projects:true}));typeSearch('');await sleep(180);
+      const actions=$('chat-list').querySelector<HTMLButtonElement>('.chat-actions')!;actions.focus();actions.click();
+      check('chat actions are available without right-click',!!$('menu-root').querySelector('[role="menu"]'));
+      key($('menu-root').querySelector<HTMLElement>('[role="menu"]')!,'Escape');
+      check('closing chat actions restores focus',document.activeElement===actions);
+      const data=new DataTransfer();data.items.add(new File([Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jbasAAAAASUVORK5CYII='),c=>c.charCodeAt(0))],'test.png',{type:'image/png'}));
+      type('');$('composer-wrap').dispatchEvent(new DragEvent('drop',{bubbles:true,dataTransfer:data}));await sleep(80);$('btn-send').click();await sleep(70);finish();await sleep(70);
+      const image=$('messages-inner').querySelector<HTMLImageElement>('.msg-img')!;key(image,'Enter');
+      check('attached images zoom by keyboard',image.classList.contains('full') && image.getAttribute('aria-expanded')==='true');
+      key(image,' ');check('image keyboard toggle shrinks again',!image.classList.contains('full'));
+      $('chat-context').querySelector<HTMLButtonElement>('button')!.click();await sleep(70);
+      const picker=$('modal-root');const folderSearch=picker.querySelector<HTMLInputElement>('[aria-label="Search folders or type a path"]')!;
+      check('folder picker has a clear empty-folder state',picker.textContent!.includes('No subfolders here') && !findButton(picker,'Start chat here').disabled);
+      folderSearch.value='/missing';key(folderSearch,'Enter');await sleep(60);
+      check('folder failure keeps the last valid folder selectable',picker.textContent!.includes('Check the path') && !findButton(picker,'Start chat here').disabled);
+      // A request arriving behind Settings takes focus after Settings closes.
+      findButton(picker,'Cancel').click();$('btn-settings').click();
+      emit({type:'extension_ui_request',method:'confirm',id:'late',title:'Request behind settings',message:'Please answer after closing Settings.'});
+      findButton($('modal-root'),'Cancel').click();await sleep(30);
+      check('closing settings focuses a waiting request',$('dialog-slot').contains(document.activeElement));
+      findButton($('dialog-slot'),'No').click();await sleep(50);
+      const createsBefore=calls.filter(c=>c.cmd==='pi_new_chat').length;delayNewChat=true;
+      $('btn-new').click();await sleep(20);
+      check('new chat shows immediate pending feedback',$<HTMLButtonElement>('btn-new').disabled && $('btn-new').textContent!.includes('Creating'));
+      $('btn-new').click();$('chat-list').querySelector<HTMLButtonElement>('.p-add')?.click();
+      check('repeated new-chat actions create one session',calls.filter(c=>c.cmd==='pi_new_chat').length===createsBefore+1);
+      releaseNewChat?.();await sleep(100);
+
+
+      result.textContent=report.join('\n')+`\n\n${report.length} UX checks passed.`;
+    } catch(e) {result.textContent=report.join('\n')+`\nSTOPPED: ${String(e)}`;}
+    finally {
+      for(const [name,value] of [['pi-chat-groups',originalGroups],['pi-parents',originalParents]] as const) {
+        if(value===null)localStorage.removeItem(name);else localStorage.setItem(name,value);
+      }
+      uxRun.disabled=false;run.disabled=false;
+    }
+  }
   async function runRegression() {
     run.disabled=true; result.textContent='Running actual UI checks…'; const report:string[]=[];
     const check=(name:string,ok:boolean)=>{report.push(`${ok?'PASS':'FAIL'} ${name}`);result.textContent=report.join('\n');if(!ok)throw new Error(name);};
