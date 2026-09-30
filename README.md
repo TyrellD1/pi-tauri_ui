@@ -37,7 +37,7 @@ npm run tauri build
 
 ## Sessions
 
-Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a blue dot in the sidebar. The harness reports its session file; the UI uses that real directory. A brand-new chat adopts its session file on the first accepted send, so its row appears without switching away. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
+Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` process per live chat (cap 6, idle ones reaped), so switching chats or folders never disturbs a running turn — background runs keep streaming with a grayscale completion dot in the sidebar. The harness reports its session file; the UI uses that real directory. A brand-new chat adopts its session file on the first accepted send, so its row appears without switching away. All chats remain searchable, with 100 rows per page. Text drafts persist locally; image drafts stay in memory while switching between chats in the same app run.
 
 Chats made by code carry a `[code]` name prefix (plus a local `code` badge that survives restarts) and can be filed into groups on creation: right-click empty sidebar → New coded chat, or call the `pi_coded_chat` Tauri command (`{ cwd, name, first_message? }`) from a future extension.
 
@@ -70,4 +70,12 @@ Open `http://127.0.0.1:1422/?dev=1`. Expand **Preview scenarios** for populated,
 
 The small Markdown renderer supports headings, fenced code, lists, quotes, links, and tables. It deliberately escapes raw HTML. Tool output starts at 200 lines with full output and copying on demand. No new runtime dependencies or polling were added. `.md` / `.html` paths in chat render as clickable buttons (inline code included, fenced code and real links excluded).
 
-**Run UI regression with a clean profile.** The suite reads real persisted state (drafts, groups, expanded projects, unseen dots), so repeated runs in one browser profile drift and report false failures. Click **Reset preview state** in the dev panel first (or clear site data) for a deterministic run; a clean profile passes all 46 checks.
+**Run UI regression with a clean profile.** The suite reads real persisted state (drafts, groups, expanded projects, unseen dots), so repeated runs in one browser profile drift and report false failures. Click **Reset preview state** in the dev panel first (or clear site data) for a deterministic run; a clean profile passes all 46 chat-flow checks.
+
+## UI/UX audit
+
+The [implemented UI/UX audit](docs/ui-ux-audit.md) covers layout, keyboard access, focus, search, drafts, permissions, recovery, theming, and rendering cost. The sidebar can be hidden with its header button or `⌘\`, and becomes a drawer in compact windows. Its resize edge also accepts arrow keys and Home to reset. Search reaches chats in closed sections and includes Clear and keyboard access to results. Chat rows have an actions button; project removal and group deletion offer Undo.
+
+The composer has an image picker alongside paste/drop support and explains steering versus follow-up behavior while running. Settings includes folder browsing, inline validation, and Follow system/Light/Dark appearance. Background permission cards name their chat and route responses to its own process.
+
+The preview now has **Run UX audit checks** as well as the existing **Run UI regression**. Reset preview state before each suite. These checks use deterministic local data and never call a model.
