@@ -75,6 +75,7 @@ check("running names tool", logic.activityLabel("running", "bash") === "Running 
 check("waiting label", logic.activityLabel("waiting") === "Waiting for your input");
 check("stopping label", logic.activityLabel("stopping") === "Stopping…");
 check("idle label", logic.activityLabel("idle") === "Ready");
+check("writing label", logic.activityLabel("writing") === "Writing…");
 
 // 7. relative dates subdued, no monospace timestamps
 check("just now", logic.fmtRelative(Date.now() - 10_000) === "just now");
