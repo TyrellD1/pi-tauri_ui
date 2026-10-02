@@ -8,8 +8,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs",
-    "install": "./install-latest.sh"
+    "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs && node scripts/agent-cli-check.mjs",
+    "install": "./install-latest.sh",
+    "test:agents": "node scripts/agent-cli-check.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
@@ -19,5 +20,8 @@
     "@tauri-apps/cli": "^2.11.4",
     "typescript": "^5.6.3",
     "vite": "^6.0.3"
+  },
+  "bin": {
+    "pi-agent": "cli/pi-agent.mjs"
   }
 }
