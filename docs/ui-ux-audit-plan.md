@@ -73,6 +73,16 @@ Legend: ✅ = shipped in this branch · ⏭ = considered, deferred (reason given
 - ⏭ **Message timestamps inline.** Shown on hover only (C12) to keep the column quiet.
 - ⏭ **Per-chat model memory.** It needs backend semantics (`set_model` fans out to all processes by design).
 
+## As built
+
+Everything marked ✅ shipped. Changes made while building:
+
+- Toasts sit in the top right of the chat pane. Errors that already have an inline home (a failed send's Retry) auto-dismiss, so they don't cover the bubble they refer to. Other errors stay until dismissed. The stack is capped at 4.
+- Permission cards no longer take focus while the composer holds a half-typed message, so the rest of that message can't land on `Y` / `N`.
+- The empty state is reused across re-renders, so its entrance plays once and doesn't replay on unrelated updates.
+- `⌘K` reopens a hidden sidebar. `↑` from the first search result returns to the search box.
+- Modals that are mainly for reading (Settings, Shortcuts) focus the dialog surface rather than the first button, so nothing opens with a focus ring.
+
 ## Verification
 
 - `npm run build` (tsc + vite) and `npm test` stay green.

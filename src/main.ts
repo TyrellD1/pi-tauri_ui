@@ -1710,6 +1710,8 @@ chatListEl.addEventListener("keydown", (e) => {
   if (items.length === 0) return;
   e.preventDefault();
   const i = items.indexOf(document.activeElement as HTMLButtonElement);
+  // ↑ from the first result returns to search when it holds a query.
+  if (e.key === "ArrowUp" && i === 0 && searchEl.value) { searchEl.focus(); return; }
   const next = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
   items[next].focus();
 });
@@ -2512,8 +2514,14 @@ function renderSettled() {
     return;
   }
   const list = blocks();
-  messagesInner.querySelector(".empty-state, .loading-state")?.remove();
-  if (!list.length) messagesInner.append(emptyState());
+  messagesInner.querySelector(":scope > .loading-state")?.remove();
+  if (!list.length) {
+    // Reuse the empty state while its inputs are unchanged, so unrelated
+    // re-renders (sidebar toggles, groups) never replay its entrance.
+    const sig = `${cwd}\n${branchCache.get(cwd) ?? ""}`;
+    const cur = messagesInner.querySelector<HTMLElement>(":scope > .empty-state");
+    if (!cur || cur.dataset.sig !== sig) { cur?.remove(); const e = emptyState(); e.dataset.sig = sig; messagesInner.append(e); }
+  } else messagesInner.querySelector(":scope > .empty-state")?.remove();
   const keep = new Set(list.map(b => b.key));
   for (const [key, view] of rendered) if (!keep.has(key)) { view.node.remove(); rendered.delete(key); fullTextByKey.delete(key); }
   let cursor: ChildNode | null = messagesInner.firstChild;
@@ -2643,7 +2651,10 @@ async function refreshBranch() {
   } catch {
     setBranch(dir, null);
   }
-  if (dir === cwd) renderBranch();
+  if (dir === cwd) {
+    renderBranch();
+    if (!messages.length && !booting && !bootError) renderSettled(); // empty state shows the branch
+  }
 }
 function renderStatus() {
   let label: string;
@@ -3495,7 +3506,10 @@ function syncDialogs() {
   let first = true;
   for (const d of dialogs.values()) { d.card.classList.toggle("hidden", !first); first = false; }
   const next = dialogs.values().next().value as UiDialog | undefined;
-  if (next && next.id !== visibleDialogId) (next.card.querySelector<HTMLElement>("input, textarea") ?? next.card).focus({preventScroll:true});
+  // Never yank focus out of a half-typed composer: with Y/N live on the card,
+  // the next keystrokes of that message could answer the request.
+  const typing = document.activeElement === inputEl && inputEl.value.trim().length > 0;
+  if (next && next.id !== visibleDialogId && !typing) (next.card.querySelector<HTMLElement>("input, textarea") ?? next.card).focus({preventScroll:true});
   visibleDialogId = next?.id ?? null;
 }
 async function respondUi(id: string, payload: Record<string, unknown>) {
@@ -4104,6 +4118,7 @@ document.addEventListener("keydown", (e) => {
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
+    if (document.body.classList.contains("side-hidden")) toggleSidebar();
     searchEl.focus();
     searchEl.select();
   }
