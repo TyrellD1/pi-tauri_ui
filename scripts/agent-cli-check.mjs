@@ -124,6 +124,17 @@ try {
     assert.ok(runs.some((r) => /waiting — #\d in queue/.test(r.stderr)), "someone waited in the queue");
     assert.equal(fs.readdirSync(path.join(home, "slots")).length, 0, "slots released");
     assert.equal(fs.readdirSync(path.join(home, "queue")).length, 0, "tickets released");
+    // Burst: 10 agents racing for 3 slots with short runs (catches snapshot races).
+    await cli(["config", "set", "max-concurrent", "3"]);
+    fs.rmSync(fakeLog, { force: true });
+    const burst = await Promise.all(Array.from({ length: 10 }, (_, i) => cli(["run", "--quiet", `burst ${i} sleep:60`])));
+    assert.ok(burst.every((r) => r.code === 0));
+    live = 0; peak = 0;
+    for (const e of fakeEvents()) {
+      if (e.ev === "start") peak = Math.max(peak, ++live);
+      if (e.ev === "end") live--;
+    }
+    assert.ok(peak <= 3, `burst peak ${peak}`);
     await cli(["config", "set", "max-concurrent", "12"]);
   });
 

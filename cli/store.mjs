@@ -216,8 +216,22 @@ function liveEntries(dir) {
   }
   return out.sort();
 }
+/**
+ * Tickets are read BEFORE slots. A runner writes its slot before it deletes
+ * its ticket, so with this order a waiter can never see the stale slot count
+ * together with a ticket list the runner ahead of it has already left
+ * (which would let two waiters take the last slot).
+ */
 export function queueSnapshot() {
-  return { slots: liveEntries(paths.slots()), tickets: liveEntries(paths.queue()) };
+  const tickets = liveEntries(paths.queue());
+  const slots = liveEntries(paths.slots());
+  return { slots, tickets };
+}
+/** Create a pid file atomically: a sweeping reader never sees it empty. */
+function writePidFile(file) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, String(process.pid));
+  fs.renameSync(tmp, file);
 }
 
 /**
@@ -231,7 +245,7 @@ export function acquireSlot(id, { onPosition, signal } = {}) {
   const ticketName = `${String(Date.now()).padStart(15, "0")}-${id}`;
   const ticket = path.join(paths.queue(), ticketName);
   const slot = path.join(paths.slots(), id);
-  fs.writeFileSync(ticket, String(process.pid));
+  writePidFile(ticket);
   let released = false;
   const release = () => {
     if (released) return;
@@ -252,12 +266,12 @@ export function acquireSlot(id, { onPosition, signal } = {}) {
     const onAbort = () => finish(new Error("cancelled while queued"));
     const tryTake = () => {
       if (done) return;
-      const { max } = { max: loadConfig().maxConcurrent };
+      const max = loadConfig().maxConcurrent;
       const { slots, tickets } = queueSnapshot();
       const pos = tickets.indexOf(ticketName);
       if (pos < 0) { finish(new Error("queue ticket vanished")); return; }
       if (slots.length + pos < max) {
-        fs.writeFileSync(slot, String(process.pid));
+        writePidFile(slot);
         try { fs.unlinkSync(ticket); } catch { /* ok */ }
         finish(null);
         return;
