@@ -632,14 +632,51 @@ kbd {
 .composer-btn.ghost:hover:not(:disabled) { color: var(--ink); background: var(--surface); }
 .composer-btn:not(:disabled):active { transform: scale(0.94); }
 .composer-btn:disabled { opacity: 0.35; cursor: default; }
-.composer-controls { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
-.ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--quiet); }
-.ctl select {
-  border: 1px solid transparent; background: transparent;
-  border-radius: 7px; padding: 4px 6px; font-size: 12px; height: 32px;
-  color: var(--muted); cursor: pointer; font-family: var(--font); max-width: 200px;
+.composer-controls { display: flex; gap: 4px; align-items: center; margin-top: 8px; margin-left: -8px; }
+/* command pickers (model, thinking): trigger + searchable grouped popover */
+.picker-trigger {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 260px; height: 30px;
+  border: 1px solid transparent; background: transparent; border-radius: 7px; padding: 0 6px 0 8px;
+  font-family: var(--font); font-size: 12px; color: var(--muted); cursor: pointer;
 }
-.ctl select:hover { color: var(--ink); background: var(--surface); border-color: var(--line); }
+.picker-trigger:hover:not(:disabled), .picker-trigger.open { color: var(--ink); background: var(--surface); border-color: var(--line); }
+.picker-trigger:disabled { opacity: 0.55; cursor: default; }
+.picker-trigger .pk-kicker { color: var(--quiet); flex-shrink: 0; }
+.picker-trigger .pk-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.picker-trigger .pk-chev { width: 13px; height: 13px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; transition: transform 120ms ease; }
+.picker-trigger.open .pk-chev { transform: rotate(180deg); }
+.picker-pop {
+  position: fixed; z-index: 60; display: flex; flex-direction: column;
+  background: var(--page); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14); overflow: hidden;
+  animation: pop-in 120ms ease-out; transform-origin: bottom left;
+}
+.picker-pop.below { transform-origin: top left; }
+:root[data-theme="dark"] .picker-pop { box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5); }
+.pk-search { position: relative; border-bottom: 1px solid var(--line); flex-shrink: 0; }
+.pk-search-icon { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 14px; height: 14px; fill: none; stroke: var(--quiet); stroke-width: 1.8; stroke-linecap: round; pointer-events: none; }
+.pk-search input {
+  width: 100%; border: none; outline: none; background: transparent; color: var(--ink);
+  font-family: var(--font); font-size: 13px; padding: 10px 12px 10px 33px;
+}
+.pk-search input::placeholder { color: var(--quiet); }
+.pk-list { overflow-y: auto; padding: 4px; overscroll-behavior: contain; min-height: 0; }
+.pk-group {
+  position: sticky; top: -4px; z-index: 1; background: var(--page);
+  padding: 8px 10px 4px 10px; font-size: 10.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.6px; color: var(--quiet);
+}
+.pk-item {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 7px;
+  font-size: 13px; color: var(--ink); cursor: pointer; min-width: 0;
+}
+.pk-item.active { background: var(--surface-deep); }
+.pk-item .pk-check { width: 14px; height: 14px; flex-shrink: 0; color: var(--ink); }
+.pk-item .pk-check svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; display: block; }
+.pk-item .pk-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pk-item.selected .pk-label { font-weight: 500; }
+.pk-item .pk-hint { margin-left: auto; padding-left: 10px; font-size: 11.5px; color: var(--quiet); white-space: nowrap; flex-shrink: 0; }
+.pk-empty { padding: 14px 10px; font-size: 12.5px; color: var(--quiet); text-align: center; }
 .composer-hint { margin-left: auto; font-size: 11px; color: var(--quiet); white-space: nowrap; }
 .composer-foot { display: flex; gap: 10px; align-items: baseline; margin-top: 6px; font-size: 11.5px; color: var(--quiet); min-height: 18px; }
 #status-line { flex-shrink: 0; }
@@ -815,6 +852,7 @@ dl.keys dd { color: var(--muted); }
   .tool-toggle .chev, .think-toggle svg { transition: none; }
   .assistant-block.streaming .md > :last-child::after, .tool-toggle[data-state="running"] .t-state { animation: none; }
   .live-tail .dots i { animation: none; opacity: 0.6; }
+  .picker-pop, .picker-trigger .pk-chev,
   .notice, .menu, .popover, .modal, .modal-back, .dialog-card, .empty-state, .jump-latest { animation: none; transition: none; }
   input.switch, input.switch::after, .msg-actions { transition: none; }
 }

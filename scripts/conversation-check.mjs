@@ -6,7 +6,7 @@ import {pathToFileURL} from 'node:url';
 import assert from 'node:assert/strict';
 const dir=mkdtempSync(join(tmpdir(),'pi-controller-'));
 try {
-  for(const name of ['conversation','logic']) execFileSync('node_modules/.bin/esbuild',[`src/${name}.ts`,'--bundle','--platform=node','--format=esm',`--outfile=${dir}/${name}.mjs`],{stdio:'pipe'});
+  for(const name of ['conversation','logic','picker']) execFileSync('node_modules/.bin/esbuild',[`src/${name}.ts`,'--bundle','--platform=node','--format=esm',`--outfile=${dir}/${name}.mjs`],{stdio:'pipe'});
   const {Conversation}=await import(pathToFileURL(`${dir}/conversation.mjs`));
   const {renderMarkdown,envelopeError}=await import(pathToFileURL(`${dir}/logic.mjs`));
   const c=new Conversation();let count=0;
@@ -29,6 +29,9 @@ try {
   check('table cells escape exactly once and preserve inline code pipes',()=>{const html=renderMarkdown('| A | B |\n| --- | --- |\n| <x> & y | `a|b` |');assert(html.includes('&lt;x&gt; &amp; y'));assert(!html.includes('&amp;lt;'));assert(html.includes('<code>a|b</code>'));});
   check('fenced markup remains literal',()=>{const html=renderMarkdown('```html\n<a href="x">**literal**</a>\n```');assert(!html.includes('<strong>'));assert(html.includes('&lt;a'));});
   check('markdown images become resolvable placeholders',()=>{const html=renderMarkdown('See ![Slide 4](/a/b.png) now');assert(html.includes('class="md-img"'));assert(html.includes('data-path="/a/b.png"'));assert(html.includes('alt="Slide 4"'));assert(!html.includes('src='));});
+  const {filterItems}=await import(pathToFileURL(`${dir}/picker.mjs`));
+  const models=[{value:'anthropic/claude-sonnet-4',label:'claude-sonnet-4',group:'anthropic'},{value:'openai/gpt-5',label:'gpt-5',group:'openai'},{value:'opencode-go/muse-spark',label:'muse-spark',group:'opencode-go'}];
+  check('picker search matches label, group and value, all tokens',()=>{assert.deepEqual(filterItems(models,'').length,3);assert.deepEqual(filterItems(models,'SONNET').map(m=>m.label),['claude-sonnet-4']);assert.deepEqual(filterItems(models,'openai').map(m=>m.label),['gpt-5']);assert.deepEqual(filterItems(models,'anthropic 4').map(m=>m.label),['claude-sonnet-4']);assert.equal(filterItems(models,'anthropic gpt').length,0);});
   const prod=readdirSync('dist/assets').filter(n=>n.endsWith('.js')).map(n=>readFileSync(`dist/assets/${n}`,'utf8')).join('\n');
   check('production bundles exclude preview fixtures',()=>{assert(!prod.includes('Preview scenarios'));assert(!prod.includes('Preview rejection'));assert(!prod.includes('Run UI regression'));});
   console.log(`${count} controller and production checks passed.`);

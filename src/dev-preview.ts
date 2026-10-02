@@ -262,6 +262,20 @@ export function installPreview() {
       check('disconnect disables send and retains draft',$<HTMLButtonElement>('btn-send').disabled && input.value==='draft through disconnect');
       Array.from($('messages-inner').querySelectorAll('button')).find(b=>b.textContent==='Retry connection')!.click();await sleep(120);
       check('reconnect resumes same chat and draft',path===reconnectPath && input.value==='draft through disconnect' && !$<HTMLButtonElement>('btn-send').disabled);
+      // Model picker: controlled popover — search narrows grouped options,
+      // Enter picks, the trigger reflects the owner's state.
+      $('model-picker').click();await sleep(30);
+      const pkInput=document.querySelector<HTMLInputElement>('.picker-pop input')!;
+      check('model picker opens with grouped options',!!pkInput && document.querySelectorAll('.picker-pop .pk-group').length===2 && document.activeElement===pkInput);
+      pkInput.value='sonnet';pkInput.dispatchEvent(new Event('input',{bubbles:true}));
+      check('model search filters',document.querySelectorAll('.picker-pop .pk-item').length===1);
+      pkInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(60);
+      check('model pick calls set_model and closes',!document.querySelector('.picker-pop') && [...calls].reverse().find(c=>c.cmd==='pi_set_model')?.args?.modelId==='claude-sonnet-4' && $('model-picker').textContent!.includes('claude-sonnet-4'));
+      $('thinking-picker').click();await sleep(30);
+      const tkInput=document.querySelector<HTMLInputElement>('.picker-pop input')!;
+      tkInput.value='max';tkInput.dispatchEvent(new Event('input',{bubbles:true}));
+      tkInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(60);
+      check('thinking pick calls set_thinking',[...calls].reverse().find(c=>c.cmd==='pi_set_thinking')?.args?.level==='max');
       typeSearch('');await sleep(200);await loadScenario('Populated');
       check('tables render without literal syntax',!!$('messages-inner').querySelector('table'));
       result.textContent=report.join('\n')+`\n\n${report.length} checks passed.`;

@@ -1,5 +1,6 @@
 import { Conversation, type Message, textOf } from "./conversation";
 import { invoke, listen } from "./tauri-shim";
+import { createPicker, type PickerItem } from "./picker";
 import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import {
   activityLabel,
@@ -46,8 +47,35 @@ const attachStrip = $("attach-strip");
 const attachError = $("attach-error");
 const composerWrap = $("composer-wrap");
 const noticesEl = $("notices");
-const modelSelect = $("model-select") as HTMLSelectElement;
-const thinkingSelect = $("thinking-select") as HTMLSelectElement;
+// Model + thinking: controlled command pickers (searchable popovers). The
+// pickers render whatever state is pushed in; every change flows through
+// setModel / setThinking below, which own optimism and rollback.
+const modelPicker = createPicker({
+  id: "model-picker",
+  label: "Model",
+  searchPlaceholder: "Search models…",
+  emptyText: "Default model",
+  onChange: (v) => void setModel(v),
+});
+const THINKING_LEVELS: PickerItem[] = [
+  { value: "off", label: "Off", hint: "No reasoning" },
+  { value: "minimal", label: "Minimal", hint: "Quickest" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium", hint: "Balanced" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max", hint: "Deepest, slowest" },
+];
+const thinkingPicker = createPicker({
+  id: "thinking-picker",
+  label: "Thinking",
+  searchPlaceholder: "Search levels…",
+  emptyText: "Default",
+  onChange: (v) => void setThinking(v),
+});
+thinkingPicker.setState({ items: THINKING_LEVELS, value: "medium" });
+$("model-slot").replaceWith(modelPicker.trigger);
+$("thinking-slot").replaceWith(thinkingPicker.trigger);
 const queueBar = $("queue-bar");
 const modalRoot = $("modal-root");
 const menuRoot = $("menu-root");
@@ -648,6 +676,8 @@ function openShortcuts() {
         ["⇧ Enter", "New line"],
         ["↑", "Recall your last message (empty composer)"],
         ["/ or $", "Insert a skill"],
+        [kbd("⇧M"), "Pick model"],
+        [kbd("⇧T"), "Pick thinking level"],
         ["Esc", "Stop the running turn"],
       ]],
       ["Requests from pi", [
@@ -774,7 +804,7 @@ async function openSessionDetails() {
           ["session", String((st.sessionName as string) ?? (st.sessionId as string) ?? "—")],
           ["model", model ? `${model.provider}/${model.id}` : "—"],
           ["messages", String(Number(st.messageCount ?? messages.length ?? 0))],
-          ["thinking", String((st.thinkingLevel as string) ?? thinkingSelect.value)],
+          ["thinking", String((st.thinkingLevel as string) ?? thinkingPicker.state.value ?? "—")],
           ["input tok", tokens ? String(tokens.input ?? "—") : "—"],
           ["output tok", tokens ? String(tokens.output ?? "—") : "—"],
           ["cost", `$${Number((stats.cost as number) ?? 0).toFixed(4)}`],
@@ -2686,7 +2716,7 @@ function updateSendState() {
   const conn = !booting && !bootError && !navigating;
   queueBtn.disabled = !ok || !conn || sendInFlight !== null;
   stopBtn.disabled = stopping || !conn;
-  modelSelect.disabled = !conn || streaming; thinkingSelect.disabled = !conn || streaming;
+  modelPicker.setState({ disabled: !conn || streaming }); thinkingPicker.setState({ disabled: !conn || streaming });
   inputEl.disabled = navigating;
   $("btn-new").toggleAttribute("disabled", !conn);
   chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn);
@@ -2761,8 +2791,8 @@ function applyState(st: Record<string, unknown>) {
   activeName = String(st.sessionName ?? "");
   renderTitle();
   renderBranch();
-  const level = String(st.thinkingLevel ?? thinkingSelect.value);
-  if ([...thinkingSelect.options].some(o => o.value === level)) thinkingSelect.value = level;
+  const level = typeof st.thinkingLevel === "string" ? st.thinkingLevel : null;
+  if (level && THINKING_LEVELS.some(o => o.value === level)) thinkingPicker.setState({ value: level });
   setBusy(st.isStreaming === true); renderProjects();
 }
 async function refreshState() {
@@ -2836,35 +2866,14 @@ async function refreshModels() {
   try {
     const res = (await invokeScoped("pi_get_models")) as { models: { id: string; provider: string }[]; current: string | null };
     if (gen !== bootGen) return;
-    const cur = modelSelect.value;
-    modelSelect.innerHTML = "";
-    // Grouped by provider so the closed select shows just the model id
-    // instead of a provider prefix truncated mid-word.
-    const byProvider = new Map<string, HTMLOptGroupElement>();
-    for (const m of res.models ?? []) {
-      let g = byProvider.get(m.provider);
-      if (!g) {
-        g = document.createElement("optgroup");
-        g.label = m.provider;
-        byProvider.set(m.provider, g);
-        modelSelect.appendChild(g);
-      }
-      const o = document.createElement("option");
-      o.value = `${m.provider}/${m.id}`;
-      o.textContent = m.id;
-      o.title = `${m.provider}/${m.id}`;
-      g.appendChild(o);
-    }
-    if (modelSelect.options.length === 0) {
-      const o = document.createElement("option");
-      o.textContent = "default model";
-      modelSelect.appendChild(o);
-    } else if (res.current && [...modelSelect.options].some((o) => o.value === res.current)) {
-      modelSelect.value = res.current;
-    } else if (cur && [...modelSelect.options].some((o) => o.value === cur)) {
-      modelSelect.value = cur;
-    }
-    modelSelect.title = modelSelect.value || "Model";
+    // Grouped by provider; the trigger shows just the model id.
+    const items: PickerItem[] = (res.models ?? []).map((m) => ({
+      value: `${m.provider}/${m.id}`, label: m.id, group: m.provider, title: `${m.provider}/${m.id}`,
+    }));
+    items.sort((x, y) => (x.group ?? "").localeCompare(y.group ?? "") || 0);
+    const cur = modelPicker.state.value;
+    const has = (v: string | null) => !!v && items.some((i) => i.value === v);
+    modelPicker.setState({ items, value: has(res.current) ? res.current : has(cur) ? cur : null });
     modelsErrShown = false;
   } catch (e) {
     if (!modelsErrShown) {
@@ -4030,26 +4039,30 @@ cwdBtn.onclick = () => openProjectPickerModal(cwd, "Open project", (dir) => { vo
 cwdBtn.setAttribute("aria-label", "Change project folder");
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
 
-modelSelect.onchange = async () => {
-  const [provider, ...rest] = modelSelect.value.split("/");
-  const modelId = rest.join("/");
-  modelSelect.title = modelSelect.value;
+async function setModel(value: string) {
+  const prev = modelPicker.state.value;
+  const [provider, ...rest] = value.split("/");
+  modelPicker.setState({ value }); // optimistic; rolled back below on failure
   try {
-    await invokeChecked("pi_set_model", { provider, modelId });
+    await invokeChecked("pi_set_model", { provider, modelId: rest.join("/") });
     await refreshState();
   } catch (e) {
+    modelPicker.setState({ value: prev });
     await refreshModels();
     notify({ text: `Couldn't switch model: ${String(e)}`, kind: "error", sticky: true, details: String(e) });
   }
-};
-thinkingSelect.onchange = async () => {
+}
+async function setThinking(level: string) {
+  const prev = thinkingPicker.state.value;
+  thinkingPicker.setState({ value: level });
   try {
-    await invokeChecked("pi_set_thinking", { level: thinkingSelect.value });
+    await invokeChecked("pi_set_thinking", { level });
   } catch (e) {
-    try { await refreshState(); } catch {}
+    thinkingPicker.setState({ value: prev });
+    try { await refreshState(); } catch { /* keep rollback */ }
     notify({ text: `Couldn't set thinking level: ${String(e)}`, kind: "error", sticky: true, details: String(e) });
   }
-};
+}
 
 function syncSearchChrome() {
   const has = searchEl.value.length > 0;
@@ -4105,6 +4118,16 @@ document.addEventListener("keydown", (e) => {
   if (mod && (e.key === "/" || e.key === "?")) {
     e.preventDefault();
     openShortcuts();
+    return;
+  }
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "m") {
+    e.preventDefault();
+    modelPicker.open();
+    return;
+  }
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+    e.preventDefault();
+    thinkingPicker.open();
     return;
   }
   if (mod && !e.shiftKey && e.key.toLowerCase() === "r") {
