@@ -184,8 +184,10 @@ Everything above shipped. Changes made while building:
   the read-only view reads messages straight from the session file. It uses `pi_read_session`, allowlisted to
   session files that an agent record names. No command reaches a pool process for that chat until the agent ends.
   Then the chat reloads as an ordinary chat.
-- **`npm link` caveat.** The package's own `install` lifecycle script rebuilds and reinstalls the app, so the docs
-  say `npm link --ignore-scripts` (or a symlink).
+- **Automatic install.** `install-latest.sh` (`npm run install`) now runs `scripts/install-cli.sh`, which symlinks
+  `pi-agent` next to `pi`, falling back to `~/.local/bin`. It's idempotent, never overwrites a foreign file, and a
+  `git pull` updates the CLI through the symlink. `npm run install:cli` runs just this step. Plain `npm link` is no
+  longer needed; it would also run the app installer, because of the package's `install` script.
 - **Rust status.** Crate downloads (`static.crates.io`) were blocked by this environment's network policy, so the
   Rust changes are parse-checked (`rustfmt`) but **not compiled or `cargo test`ed here**. Logic sits in pure,
   unit-tested functions; run `cargo test` / `npm run tauri build` locally before merging.

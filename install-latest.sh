@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the newest release and install it to /Applications.
+# Build the newest release, install it to /Applications, and link the
+# `pi-agent` CLI onto PATH (see scripts/install-cli.sh).
 # Usage: npm run install
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -21,6 +22,10 @@ sleep 1
 rm -rf /Applications/pi.app
 ditto "$APP" /Applications/pi.app
 touch /Applications/pi.app
+
+echo "→ linking the pi-agent CLI…"
+# Non-fatal: the app is already installed; a CLI link problem only warns.
+./scripts/install-cli.sh || echo "  (pi-agent wasn't linked — run ./scripts/install-cli.sh to see why)"
 
 echo "→ launching…"
 open /Applications/pi.app

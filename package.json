@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "test": "node scripts/regression-check.mjs && node scripts/conversation-check.mjs && node scripts/agent-cli-check.mjs",
     "install": "./install-latest.sh",
-    "test:agents": "node scripts/agent-cli-check.mjs"
+    "test:agents": "node scripts/agent-cli-check.mjs",
+    "install:cli": "./scripts/install-cli.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

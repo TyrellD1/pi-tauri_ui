@@ -43,10 +43,9 @@ Chats made by code carry a `[code]` name prefix (plus a local `code` badge that 
 
 ## Agents from the CLI (`pi-agent`)
 
-Any caller (a terminal, a script, Claude Code) can hand work to a pi agent:
+Any caller (a terminal, a script, Claude Code) can hand work to a pi agent. `npm run install` (`install-latest.sh`) links the `pi-agent` command onto your PATH automatically, next to `pi`. To link it without rebuilding the app, run `npm run install:cli`.
 
 ```bash
-npm link --ignore-scripts          # once, from this repo (plain `npm link` would run the app installer)
 pi-agent run --cwd ~/code/app "Find unused exports in src/ and list them"   # answer on stdout
 ```
 

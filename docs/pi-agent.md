@@ -18,14 +18,15 @@ closed; the app picks them up on its next launch.
 
 ## Install
 
-Node 18+ and `pi` on your `PATH`.
+This is automatic. `npm run install` (`install-latest.sh`, which builds and installs the app) also links `pi-agent`
+onto your PATH. To link only the CLI, run `npm run install:cli` (`scripts/install-cli.sh`).
 
-```bash
-# from this repo; --ignore-scripts matters: the package's own `install` script rebuilds the app
-npm link --ignore-scripts
-# or put the script on PATH yourself
-ln -s "$PWD/cli/pi-agent.mjs" /usr/local/bin/pi-agent
-```
+- **Where it goes:** next to your `pi` binary, which is already on PATH. If that folder isn't writable, it goes in
+  `~/.local/bin`, with a hint if that isn't on PATH. `PI_AGENT_BIN_DIR=/some/dir` overrides both.
+- **Stays current:** it's a symlink to this checkout's `cli/pi-agent.mjs`, so every `git pull` updates it with no
+  reinstall.
+- **Safe to re-run:** it never overwrites a `pi-agent` that isn't this repo's.
+- **Needs:** Node 18+ and `pi`, both of which you already have if you use pi.
 
 ## Use
 
