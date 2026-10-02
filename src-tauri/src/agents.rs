@@ -7,7 +7,7 @@
 // - Live bridge (Unix only): a socket at <home>/ui.sock. Each CLI runner
 //   connects, sends `agent_update` records and its pi events (already tagged
 //   with cwd + session, exactly like the pool's own events), and accepts
-//   `abort` / `ui_response` back. Events are re-emitted as `pi-event`, so the
+//   `abort` back. Agents run with full permissions: no dialogs cross over. Events are re-emitted as `pi-event`, so the
 //   frontend's existing routing (spinner, finished dot, live transcript) works
 //   unchanged.
 //

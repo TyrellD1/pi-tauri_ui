@@ -190,6 +190,21 @@ Everything above shipped. Changes made while building:
   Rust changes are parse-checked (`rustfmt`) but **not compiled or `cargo test`ed here**. Logic sits in pure,
   unit-tested functions; run `cargo test` / `npm run tauri build` locally before merging.
 
+### Follow-up (requested after review)
+
+- **No permission handling.** Agents run with pi's normal full permissions, so `--yes`, forwarding dialogs to the app
+  and answering them from the app are all removed. As a safety net, the runner dismisses any stray extension dialog
+  itself and never forwards it to the app. The fix for background-chat dialogs answering through the visible chat
+  stays.
+- **Sidebar placement.** Agent chats are flagged in two ways: the registry's session files, plus the `[agent]` name
+  for records that have been pruned. They live only in:
+  - a top-level **Headless subagents** section, a sibling of Recent, Groups and Projects, which replaces "Agents"
+  - a collapsible **Headless subagents** sub-folder at the top of each project, with its open state remembered per
+    project
+
+  They are excluded from Recent, from groups, and from a project's top-level list and count. The "Add to group"
+  action and the group badge are hidden for them. Once an agent finishes, its chat is writable like any other.
+
 ## Out of scope (follow-ups)
 
 - **Steering a running agent from the app.** It's read-only for now. The socket could carry `steer` later.

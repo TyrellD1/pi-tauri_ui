@@ -981,6 +981,36 @@ function displayName(name: string | null | undefined): string {
   return name && isAgentName(name) ? name.slice(AGENT_PREFIX.length).trim() : name ?? "";
 }
 let agents: AgentRecord[] = [];
+// Session files that belong to headless subagents (from the registry). Those
+// chats live only under "Headless subagents" — never in Recent, Groups, or a
+// project's top-level list. The `[agent]` name prefix covers records the
+// registry has already pruned.
+let agentSessionPaths = new Set<string>();
+function setAgents(list: AgentRecord[]) {
+  agents = list;
+  agentSessionPaths = new Set(list.map((a) => a.sessionFile).filter((p): p is string => !!p));
+}
+function isHeadless(s: { name: string | null; path: string }): boolean {
+  return isAgentName(s.name) || agentSessionPaths.has(s.path);
+}
+function headlessPath(path: string | null): boolean {
+  if (!path) return false;
+  if (agentSessionPaths.has(path)) return true;
+  for (const list of projectChats.values()) { const s = list.find((x) => x.path === path); if (s) return isAgentName(s.name); }
+  return false;
+}
+function subagentsOpen(): Set<string> {
+  try {
+    const a = JSON.parse(prefGet("pi-subagents-open") ?? "[]") as unknown;
+    return new Set(Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : []);
+  } catch { return new Set(); }
+}
+function toggleSubagentsOpen(project: string) {
+  const o = subagentsOpen();
+  if (o.has(project)) o.delete(project); else o.add(project);
+  prefSet("pi-subagents-open", JSON.stringify([...o]));
+  renderProjects();
+}
 let agentModels: AgentModels | null = null;
 let agentMax = 12;
 let agentsExpanded = false;
@@ -999,7 +1029,7 @@ async function refreshAgents() {
   try {
     const r = await invokeChecked<{ agents?: AgentRecord[]; maxConcurrent?: number }>("pi_agents_list");
     const was = visibleAgent();
-    agents = Array.isArray(r.agents) ? r.agents : [];
+    setAgents(Array.isArray(r.agents) ? r.agents : []);
     agentMax = Number(r.maxConcurrent) || agentMax;
     renderProjects();
     if (was && !visibleAgent()) void reloadVisibleChat();
@@ -1025,7 +1055,9 @@ function onAgentUpdate(rec: AgentRecord | undefined) {
   const was = visibleAgent();
   const i = agents.findIndex((a) => a.id === rec.id);
   const prev = i >= 0 ? agents[i] : null;
-  if (i >= 0) agents[i] = rec; else agents.unshift(rec);
+  const next = [...agents];
+  if (i >= 0) next[i] = rec; else next.unshift(rec);
+  setAgents(next);
   // New session rows appear (and finished ones update) in their project.
   if ((!prev || prev.status !== rec.status) && (rec.status === "running" || AGENT_DONE.has(rec.status))) void refreshAllProjects();
   renderProjects();
@@ -1141,13 +1173,13 @@ function renderAgentsParent(q: string, isOpen: boolean) {
   const queued = agents.filter((a) => a.status === "queued").length;
   const count = document.createElement("span");
   count.className = "agents-count";
-  count.textContent = queued ? `${running}/${agentMax} · ${queued} queued` : running ? `${running}/${agentMax}` : "";
+  count.textContent = running || queued ? `${running}/${agentMax}${queued ? ` +${queued}` : ""}` : "";
   count.title = `${running} running, ${queued} queued, up to ${agentMax} at once`;
   const section = document.createElement("div");
   section.className = "parent-section agents-section";
   section.setAttribute("role", "group");
-  section.setAttribute("aria-label", "Agents");
-  section.appendChild(parentHead("Agents", "agents", isOpen, count));
+  section.setAttribute("aria-label", "Headless subagents");
+  section.appendChild(parentHead("Headless subagents", "agents", isOpen, count));
   chatListEl.appendChild(section);
   if (!isOpen) return;
   const body = document.createElement("div");
@@ -1220,7 +1252,7 @@ function groupChats(name: string, groups: ChatGroups, q: string): { info: Sessio
     const c = findProjectForPath(path);
     if (!c) continue;
     const info = (projectChats.get(c) ?? []).find((s) => s.path === path);
-    if (!info || !chatMatches(info, q)) continue;
+    if (!info || isHeadless(info) || !chatMatches(info, q)) continue;
     out.push({ info, project: c });
   }
   return out;
@@ -1547,22 +1579,17 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   row.appendChild(t);
   el.dataset.path = s.path;
   el.dataset.project = project;
+  if (isHeadless(s)) el.dataset.headless = "1";
   const rkey = `${project}:${s.path}`;
   const rlabel = s.name || s.preview.slice(0, 60) || "Untitled";
-  if (isAgentName(s.name)) {
-    const badge = document.createElement("span");
-    badge.className = "code-badge";
-    badge.textContent = "agent";
-    badge.title = "Run by pi-agent";
-    row.appendChild(badge);
-  } else if (isCoded(s.name, s.path)) {
+  if (!isHeadless(s) && isCoded(s.name, s.path)) {
     const badge = document.createElement("span");
     badge.className = "code-badge";
     badge.textContent = "code";
     badge.title = "Made by code";
     row.appendChild(badge);
   }
-  if (runningSet.has(rkey)) {
+  if (runningSet.has(rkey) || !!activeAgentFor(s.path)) {
     const spin = document.createElement("span");
     spin.className = "run-spin";
     spin.title = "Running";
@@ -1592,10 +1619,10 @@ function renderProjects() {
   const q = filter.trim().toLowerCase();
   chatListEl.innerHTML = "";
   const parents = parentsOpen();
-  renderAgentsParent(q, parents.agents);
   renderRecentParent(q, parents.recent);
   renderGroupsParent(q, parents.groups);
   renderProjectsParent(q, parents.projects);
+  renderAgentsParent(q, parents.agents);
 }
 function parentHead(title: string, key: keyof ParentState, isOpen: boolean, extra: HTMLElement | null): HTMLElement {
   const row = document.createElement("div");
@@ -1640,6 +1667,7 @@ function recentChats(q: string): { info: SessionInfo; project: string }[] {
   const push = (project: string, info: SessionInfo) => {
     if (seen.has(info.path)) return;
     seen.add(info.path);
+    if (isHeadless(info)) return;
     if (!chatMatches(info, q)) return;
     all.push({ info, project });
   };
@@ -1824,6 +1852,47 @@ async function newChatInGroup(group: string) {
   renderProjects();
   renderSettled();
 }
+// A project's "Headless subagents" sub-folder: collapsed by default (open
+// state remembered per project), opened automatically while searching.
+function subagentFolder(project: string, list: SessionInfo[], q: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "subfolder";
+  const open = !!q || subagentsOpen().has(project);
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "project-head subfolder-head" + (open ? " open" : "");
+  head.setAttribute("aria-expanded", String(open));
+  head.title = `Chats run by pi-agent in ${baseName(project)}`;
+  const chev = document.createElement("span");
+  chev.innerHTML = chevSvg();
+  const name = document.createElement("span");
+  name.className = "p-name";
+  name.textContent = "Headless subagents";
+  const running = list.filter((s) => runningSet.has(`${project}:${s.path}`) || !!activeAgentFor(s.path)).length;
+  const count = document.createElement("span");
+  count.className = "p-count";
+  count.textContent = String(list.length);
+  if (running) {
+    const sp = document.createElement("span"); sp.className = "run-spin"; sp.setAttribute("role", "img"); sp.setAttribute("aria-label", `${running} running`);
+    head.append(chev, name, sp, count);
+  }
+  if (!running) head.append(chev, name, count);
+  head.onclick = () => toggleSubagentsOpen(project);
+  wrap.appendChild(head);
+  if (open) {
+    const box = document.createElement("div");
+    box.className = "project-chats";
+    for (const s of list.slice(0, 50)) box.appendChild(chatButton(s, project));
+    if (list.length > 50) {
+      const more = document.createElement("div");
+      more.className = "project-empty";
+      more.textContent = `${list.length - 50} more — search to find older ones.`;
+      box.appendChild(more);
+    }
+    wrap.appendChild(box);
+  }
+  return wrap;
+}
 function renderProjectsParent(q: string, isOpen: boolean) {
   const projects = getProjects();
   const section = document.createElement("div");
@@ -1847,7 +1916,8 @@ function renderProjectsParent(q: string, isOpen: boolean) {
   }
   for (const p of projects) {
     const all = projectChats.get(p) ?? (p === cwd ? sessions : []);
-    const list = all.filter((s) => chatMatches(s, q));
+    const list = all.filter((s) => !isHeadless(s) && chatMatches(s, q));
+    const subList = all.filter((s) => isHeadless(s) && chatMatches(s, q));
     const section = document.createElement("div");
     section.className = "project-section";
     section.setAttribute("role", "group");
@@ -1902,10 +1972,12 @@ function renderProjectsParent(q: string, isOpen: boolean) {
       const box = document.createElement("div");
       box.className = "project-chats";
       if (list.length === 0) {
-        const e = document.createElement("div");
-        e.className = "project-empty";
-        e.textContent = q ? "No matches in this project." : "No chats yet.";
-        box.appendChild(e);
+        if (!subList.length) {
+          const e = document.createElement("div");
+          e.className = "project-empty";
+          e.textContent = q ? "No matches in this project." : "No chats yet.";
+          box.appendChild(e);
+        }
       } else if (p === cwd) {
         // Bounded visible window over the full session list: search filters across
         // every session the backend returned (paths are real), paging keeps the DOM
@@ -1934,6 +2006,9 @@ function renderProjectsParent(q: string, isOpen: boolean) {
           box.appendChild(more);
         }
       }
+      // Folder before files: the sub-folder leads, so it never hides below
+      // a long (paged) chat list.
+      if (subList.length) box.prepend(subagentFolder(p, subList, q));
       section.appendChild(box);
     }
     projSection.appendChild(section);
@@ -2114,13 +2189,16 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     openRename({ cwd: pcwd, session: target.path, current: rowName(pcwd, target.path) });
   });
   if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
+  // Headless subagent chats stay in their own section: no groups.
+  const groupable = !headlessPath(target.path);
   const trigger = addItem("Add to group ›", () => {
     if (sub) hideSub();
     else { const btns = showSub(trigger); btns[0]?.focus(); }
   }, false, true);
+  if (!groupable) { trigger.remove(); buttons.splice(buttons.indexOf(trigger), 1); }
   trigger.setAttribute("aria-haspopup", "menu");
   trigger.setAttribute("aria-expanded", "false");
-  trigger.addEventListener("mouseenter", () => { clearSubTimer(); if (!sub) showSub(trigger); });
+  trigger.addEventListener("mouseenter", () => { clearSubTimer(); if (groupable && !sub) showSub(trigger); });
   trigger.addEventListener("mouseleave", () => {
     clearSubTimer();
     ctxSubTimer = window.setTimeout(hideSub, 150);
@@ -2684,7 +2762,7 @@ function chatContextBar(): HTMLElement {
   const groups = loadGroups();
   const ap = activePath;
   const memberOf = ap ? Object.keys(groups).filter((n) => groups[n].includes(ap)) : [];
-  const shown: (string | null)[] = memberOf.length > 0 ? memberOf : [null];
+  const shown: (string | null)[] = headlessPath(ap) ? [] : memberOf.length > 0 ? memberOf : [null];
   for (const n of shown) {
     const gb = document.createElement("button");
     gb.type = "button";
@@ -2709,6 +2787,7 @@ async function pickProjectDir(dir: string) {
   await newChatInProject(dir);
 }
 function openGroupPicker(anchor: HTMLElement) {
+  if (headlessPath(activePath)) { notify({ text: "Headless subagent chats stay in their own section and can't join groups." }); return; }
   if (!activePath) { notify({ text: "Start or open a chat first — groups need a session to hold." }); return; }
   const path = activePath;
   const groups = loadGroups();
@@ -3800,13 +3879,6 @@ function showExtensionDialog(req: PiEvent) {
   // Answer where the request came from — a background chat or a CLI agent —
   // never through whichever chat happens to be visible.
   const scope = typeof req.cwd === "string" ? { cwd: req.cwd, session: typeof req.session === "string" ? req.session : null } : null;
-  if (req.external) {
-    const from = agents.find((a) => a.sessionFile && a.sessionFile === scope?.session);
-    const note = document.createElement("div");
-    note.className = "dialog-context";
-    note.textContent = `From agent: ${from?.name ?? "pi-agent"}`;
-    title.after(note);
-  }
   dialogs.set(id, {id, card, inFlight: false, scope});
   dialogSlot.appendChild(card);
   syncDialogs();
@@ -3893,7 +3965,8 @@ async function handleEvent(p: PiEvent) {
     await refreshAllProjects(); return;
   }
   if (t === "agent_update") { onAgentUpdate(p.agent as AgentRecord | undefined); return; }
-  if (t === "extension_ui_request") { showExtensionDialog(p); return; }
+  // Headless agents never prompt (their runner dismisses dialogs itself).
+  if (t === "extension_ui_request") { if (!p.external) showExtensionDialog(p); return; }
   // Route by owning chat: untagged events (preview fixtures) belong here.
   // While the visible chat has no session file yet, same-cwd tagged events
   // are also this view's (pre-adopt window, idea 5 / R2-F1).

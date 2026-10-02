@@ -172,15 +172,14 @@ try {
     await cli(["config", "set", "max-concurrent", "12"]);
   });
 
-  await check("dialogs: auto-cancel with no app, --yes approves", async () => {
-    let r = await cli(["run", "needs dialog"]);
+  await check("headless: extension dialogs are dismissed, never block", async () => {
+    const r = await cli(["run", "needs dialog"]);
+    assert.equal(r.code, 0);
     assert.equal(r.stdout.trim(), "DIALOG: cancelled");
-    assert.match(r.stderr, /auto-cancelled/);
-    r = await cli(["run", "--yes", "needs dialog"]);
-    assert.equal(r.stdout.trim(), "DIALOG: confirmed");
+    assert.match(r.stderr, /dismissed/);
   });
 
-  await check("app socket: updates + tagged events stream in; dialog answered and abort from the app", async () => {
+  await check("app socket: updates + tagged events stream in, dialogs never forwarded, abort from the app", async () => {
     const sockPath = path.join(home, "ui.sock");
     const got = [];
     let conn = null;
@@ -201,7 +200,8 @@ try {
     });
     await new Promise((r) => server.listen(sockPath, r));
     const r = await cli(["run", "--name", "live", "dialog via app"]);
-    assert.equal(r.stdout.trim(), "DIALOG: confirmed", r.stderr);
+    assert.equal(r.stdout.trim(), "DIALOG: cancelled", r.stderr);
+    assert.ok(!got.some((m) => m.type === "event" && m.event.type === "extension_ui_request"), "dialogs stay inside the runner");
     const statuses = got.filter((m) => m.type === "agent_update").map((m) => m.agent.status);
     assert.ok(statuses.includes("running") && statuses.at(-1) === "done", statuses.join(","));
     const evs = got.filter((m) => m.type === "event").map((m) => m.event);

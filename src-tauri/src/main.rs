@@ -61,9 +61,9 @@ struct Pool {
     /// Scope of the visible chat. Its process is exempt from reaping — the
     /// tab you are looking at stays connected (CodeG's active-tab rule).
     visible: Mutex<(String, Option<String>)>,
-    /// Session file → connected `pi-agent` runner (see agents.rs). Abort and
-    /// dialog answers for an agent's chat go to its runner, never to a pool
-    /// process (the CLI owns that session while it runs).
+    /// Session file → connected `pi-agent` runner (see agents.rs). Stopping
+    /// an agent's chat goes to its runner, never to a pool process (the CLI
+    /// owns that session while it runs).
     agent_links: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
 }
 
@@ -793,12 +793,6 @@ async fn pi_coded_chat(cwd: String, name: String, first_message: Option<String>,
 
 #[tauri::command]
 async fn pi_ui_response(cwd: String, session: Option<String>, id: String, payload: Value, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
-    // A CLI agent's dialog: the answer goes back to its runner.
-    if let Some(link) = agents::link_for(&pool, session.as_deref()).await {
-        link.send(serde_json::json!({ "type": "ui_response", "id": id, "payload": payload }).to_string())
-            .map_err(|_| "the agent disconnected; it auto-answered the request".to_string())?;
-        return Ok(serde_json::json!({ "ok": true }));
-    }
     let mut cmd = serde_json::json!({ "type": "extension_ui_response", "id": id });
     if let Value::Object(map) = payload {
         if let Value::Object(cmd_map) = &mut cmd {

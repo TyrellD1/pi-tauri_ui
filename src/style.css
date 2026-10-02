@@ -923,3 +923,10 @@ dl.keys dd { color: var(--muted); }
 .am-note { margin: 2px 0 0 0 !important; }
 .am-note code { font-family: var(--mono); font-size: 11px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; word-break: break-word; }
 @media (prefers-reduced-motion: reduce) { .agent-banner { animation: none; } }
+
+/* a project's "Headless subagents" sub-folder */
+.subfolder { margin-top: 2px; }
+.subfolder-head { padding: 5px 8px; }
+.subfolder-head .p-name { font-size: 12px; font-weight: 500; color: var(--muted); }
+.subfolder-head:hover .p-name { color: var(--ink); }
+.subfolder .project-chats { padding-left: 12px; }

@@ -1,8 +1,20 @@
 # pi-agent
 
-`pi-agent` hands a task to a pi agent and prints the agent's final answer. Every agent is a real pi session, so it
-shows up in the pi app under its project, badged **agent**. While the app is open you can watch it stream, answer its
-permission prompts, and stop it. Agents also run with the app closed; the app picks them up on its next launch.
+`pi-agent` hands a task to a headless pi agent and prints the agent's final answer. Agents run with pi's normal full
+permissions, so nothing ever asks for approval. Every agent is a real pi session, and the app keeps these chats
+apart from your own. While the app is open you can watch an agent stream and stop it. Agents also run with the app
+closed; the app picks them up on its next launch.
+
+## In the app
+
+- **Headless subagents** is a sidebar section next to Recent, Groups and Projects. It lists every agent with its
+  status: queued #n, running, done, failed or stopped.
+- Each project also has a collapsible **Headless subagents** sub-folder holding the agent chats that ran in that
+  folder.
+- Agent chats never appear in Recent, in a group, or among a project's own top-level chats, and they can't be added
+  to groups.
+- While an agent runs its chat is read-only, with a Stop button. Once it finishes you can open it and keep writing
+  like any other chat.
 
 ## Install
 
@@ -70,14 +82,10 @@ pi-agent models reset                 # back to opencode-go/muse-spark-1.3-contr
 
 The app shows the same list under **Settings → Agents**. Recommended models also carry a hint in the model picker.
 
-## Permission prompts
+## Permissions
 
-- **App open:** an agent's dialogs appear in the app, labelled with the agent's name, and your answer goes back to
-  the agent.
-- **App closed:** dialogs are cancelled so the run never hangs. Pass `--yes` to approve confirms (and take the first
-  option of selects) instead.
-
-Either way, stderr says what was auto-answered.
+Agents run with pi's normal full permissions, and there are no approval prompts. If an extension ever opens a
+dialog anyway, the runner dismisses it right away, with a note on stderr, so a run can never hang.
 
 ## For AI callers (Claude Code and others)
 

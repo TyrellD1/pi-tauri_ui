@@ -50,10 +50,12 @@ npm link --ignore-scripts          # once, from this repo (plain `npm link` woul
 pi-agent run --cwd ~/code/app "Find unused exports in src/ and list them"   # answer on stdout
 ```
 
-- **Visible in the app.** Each agent is a real pi session. It shows up under its project (badged **agent**) and in
-  the sidebar's **Agents** section, which shows queued position, running, done and failed.
-- **Live while it runs.** With the app open you can watch it stream, answer its permission prompts, and stop it.
-  The chat is read-only while the agent runs.
+- **Kept apart in the app.** Agents run headless with pi's normal full permissions, so nothing prompts. Their chats
+  live only in the sidebar's **Headless subagents** section (with queued / running / done / failed status) and in a
+  **Headless subagents** sub-folder inside each project. They never appear in Recent, in groups, or among a project's
+  own chats.
+- **Live while it runs.** With the app open you can watch an agent stream and stop it. The chat is read-only while
+  the agent runs and writable once it finishes.
 - **Queue.** At most 12 agents run at once (`pi-agent config set max-concurrent N`); the rest queue.
 - **Recommended models.** A shared list with when-to-use and when-not-to-use notes. The default is
   `opencode-go/muse-spark-1.3-contributor`; edit it with `pi-agent models set|default|remove`.

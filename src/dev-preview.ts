@@ -46,7 +46,9 @@ function previewSessions() {
   // Chats created in this session must list too — the real backend does, and
   // the sidebar expects the active chat to be present (queue/run-state checks
   // navigate back to it by position).
-  return [...createdSessions, ...generated];
+  // Headless subagent chats are ordinary pi sessions named "[agent] …".
+  const headless = agentFixtures.filter(a=>a.sessionFile).map((a,i)=>({path:a.sessionFile!,id:a.id,name:`[agent] ${a.name}`,preview:a.task ?? a.name,mtime:Date.now()-i*1000,messageCount:2}));
+  return [...headless, ...createdSessions, ...generated];
 }
 function user(message: string, images: unknown[] = []): Message {
   return {role:'user',content:[...(message ? [{type:'text',text:message}] : []), ...images.map(im=>({...(im as object),type:'image'}))],timestamp:Date.now()};
@@ -304,6 +306,16 @@ export function installPreview() {
       // CLI agents: listed live, open read-only (no pi process), stream, stop.
       typeSearch('');await sleep(200);await loadScenario('Agents');await sleep(120);
       check('agents section lists running, queued, done, failed',$('chat-list').querySelectorAll('.agent-item').length===4 && $('chat-list').textContent!.includes('#1') && !!$('chat-list').querySelector('.agent-item .run-spin'));
+      $('chat-list').querySelectorAll<HTMLButtonElement>('.parent-head').forEach(h=>{ if(h.textContent?.includes('Recent') && h.getAttribute('aria-expanded')==='false') h.click(); });await sleep(60);
+      const projBox2=[...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!;
+      const sub=projBox2.querySelector<HTMLButtonElement>('.subfolder-head');
+      check('headless chats sit in the project sub-folder, not its top level or Recent',
+        !!sub && sub.textContent!.includes('Headless subagents') && !projBox2.querySelector(':scope > .project-chats > .chat-item[data-headless]') && !$('chat-list').querySelector('[aria-label="Recent"] [data-headless]'));
+      sub!.click();await sleep(60);
+      check('opening the sub-folder lists the agent chats',[...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!.querySelectorAll('.subfolder .chat-item[data-headless]').length===3);
+      [...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!.querySelector<HTMLElement>('.subfolder .chat-item')!.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:60,clientY:60}));await sleep(40);
+      check('headless chats offer no group actions',!!$('menu-root').querySelector('.menu-item') && !$('menu-root').textContent!.includes('Add to group'));
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await sleep(20);
       const beforeOpen2=calls.length;
       $('chat-list').querySelector<HTMLButtonElement>('.agent-item')!.click();await sleep(120);
       const opened2=calls.slice(beforeOpen2).map(c=>c.cmd);

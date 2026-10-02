@@ -18,7 +18,7 @@ const DIALOGS = new Set(["select", "confirm", "input", "editor"]);
 const THINKING = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 // ---------- args ----------
-const BOOL_FLAGS = new Set(["detach", "json", "yes", "quiet", "all", "default", "help"]);
+const BOOL_FLAGS = new Set(["detach", "json", "quiet", "all", "default", "help"]);
 function parseArgs(argv) {
   const out = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -178,7 +178,6 @@ async function runAgent(opts) {
   store.pruneAgents();
 
   let rpc = null, sessionFile = null, finished = false, cancelReason = null;
-  const pendingDialogs = new Map();
   const queueAbort = new AbortController();
   let settleResolve;
   const settled = new Promise((r) => { settleResolve = r; });
@@ -188,29 +187,15 @@ async function runAgent(opts) {
     app.send({ type: "agent_update", agent: rec });
     return rec;
   };
-  const autoAnswer = (req, why) => {
-    let payload = { cancelled: true };
-    if (opts.yes) {
-      if (req.method === "confirm") payload = { confirmed: true };
-      else if (req.method === "select" && Array.isArray(req.options) && req.options.length) payload = { value: req.options[0] };
-    }
-    log.info(`pi-agent: ${why} — ${req.method} "${req.title ?? ""}" auto-${payload.cancelled ? "cancelled" : "approved"}${opts.yes ? "" : " (pass --yes to approve)"}`);
-    rpc?.write({ type: "extension_ui_response", id: req.id, ...payload });
+  // Agents run with pi's normal full permissions; nobody is asked anything.
+  // A stray extension dialog is cancelled at once so a run can never hang.
+  const dismissDialog = (req) => {
+    log.info(`pi-agent: extension asked "${req.title ?? req.method}" — dismissed (headless agents don't prompt)`);
+    rpc?.write({ type: "extension_ui_response", id: req.id, cancelled: true });
   };
   const app = new AppLink(
-    (msg) => {
-      if (msg.type === "abort") void cancel("stopped from the app");
-      else if (msg.type === "ui_response" && typeof msg.id === "string" && pendingDialogs.has(msg.id)) {
-        pendingDialogs.delete(msg.id);
-        const payload = msg.payload && typeof msg.payload === "object" ? msg.payload : { cancelled: true };
-        rpc?.write({ type: "extension_ui_response", id: msg.id, ...payload });
-      }
-    },
-    () => {
-      // App went away mid-dialog: never leave the run hanging.
-      for (const req of pendingDialogs.values()) autoAnswer(req, "app disconnected");
-      pendingDialogs.clear();
-    },
+    (msg) => { if (msg.type === "abort") void cancel("stopped from the app"); },
+    () => {},
   );
   if (await app.connect(true)) app.send({ type: "agent_update", agent: rec });
 
@@ -257,13 +242,11 @@ async function runAgent(opts) {
       // Tag like the app's own processes so its routing works unchanged.
       // Nothing is forwarded before the session file is known: an untagged
       // event would match any fresh "new chat" view in the same folder.
-      if (sessionFile) app.send({ type: "event", event: { ...ev, cwd, session: sessionFile, agentId: id } });
+      const dialog = ev.type === "extension_ui_request" && DIALOGS.has(ev.method);
+      if (sessionFile && !dialog) app.send({ type: "event", event: { ...ev, cwd, session: sessionFile, agentId: id } });
       if (!app.connected) void app.connect().then((ok) => ok && app.send({ type: "agent_update", agent: rec }));
       if (ev.type === "tool_execution_start") log.info(`  › ${shortTool(ev)}`);
-      if (ev.type === "extension_ui_request" && DIALOGS.has(ev.method)) {
-        if (app.connected) { pendingDialogs.set(ev.id, ev); log.info(`pi-agent: "${ev.title ?? ev.method}" — answer it in the pi app`); }
-        else autoAnswer(ev, "no app attached to answer");
-      }
+      if (dialog) dismissDialog(ev);
       if (ev.type === "agent_settled") settleResolve("settled");
     });
     void rpc.exited.then(() => settleResolve("exited"));
@@ -395,7 +378,6 @@ Run options
   --name NAME        chat name in the app (shown as "[agent] NAME")
   --detach           print the agent id and return; use \`pi-agent wait ID\` later
   --timeout MIN      stop after MIN minutes
-  --yes              auto-approve confirm dialogs when no app is open to ask you
   --caller NAME      who is asking (shown in the app); or PI_AGENT_CALLER
   --json             JSON output   --quiet  no progress on stderr
 
@@ -422,7 +404,6 @@ async function main(argv) {
         const self = fileURLToPath(import.meta.url);
         const childArgs = [self, "run", "--id", id, "--cwd", cwd, "--quiet"];
         for (const k of ["model", "thinking", "name", "timeout", "caller"]) if (a[k]) childArgs.push(`--${k}`, String(a[k]));
-        if (a.yes) childArgs.push("--yes");
         childArgs.push("--", task);
         store.writeAgent({ id, name: (a.name || defaultName(task)).trim(), task: task.slice(0, 2000), cwd, model: a.model || store.loadModels().default, status: "queued", pid: null, caller: a.caller || process.env.PI_AGENT_CALLER || "cli", createdAt: Date.now() });
         const child = spawn(process.execPath, childArgs, { detached: true, stdio: "ignore", env: process.env });
