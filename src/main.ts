@@ -1,5 +1,6 @@
 import { Conversation, type Message, textOf } from "./conversation";
 import { invoke, listen } from "./tauri-shim";
+import { createPicker, type PickerItem } from "./picker";
 import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import {
   activityLabel,
@@ -36,7 +37,6 @@ const queueBtn = $("btn-queue") as HTMLButtonElement;
 const statusLine = $("status-line");
 const runSpin = $("run-spin");
 const branchLine = $("branch-line");
-const tokenLine = $("token-line");
 const ctxWarn = $("ctx-warn");
 const chatTitle = $("chat-title");
 const cwdBtn = $("btn-cwd") as HTMLButtonElement;
@@ -47,14 +47,55 @@ const attachStrip = $("attach-strip");
 const attachError = $("attach-error");
 const composerWrap = $("composer-wrap");
 const noticesEl = $("notices");
-const modelSelect = $("model-select") as HTMLSelectElement;
-const thinkingSelect = $("thinking-select") as HTMLSelectElement;
+// Model + thinking: controlled command pickers (searchable popovers). The
+// pickers render whatever state is pushed in; every change flows through
+// setModel / setThinking below, which own optimism and rollback.
+const modelPicker = createPicker({
+  id: "model-picker",
+  label: "Model",
+  searchPlaceholder: "Search models…",
+  emptyText: "Default model",
+  onChange: (v) => void setModel(v),
+});
+const THINKING_LEVELS: PickerItem[] = [
+  { value: "off", label: "Off", hint: "No reasoning" },
+  { value: "minimal", label: "Minimal", hint: "Quickest" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium", hint: "Balanced" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max", hint: "Deepest, slowest" },
+];
+const thinkingPicker = createPicker({
+  id: "thinking-picker",
+  label: "Thinking",
+  searchPlaceholder: "Search levels…",
+  emptyText: "Default",
+  onChange: (v) => void setThinking(v),
+});
+thinkingPicker.setState({ items: THINKING_LEVELS, value: "medium" });
+$("model-slot").replaceWith(modelPicker.trigger);
+$("thinking-slot").replaceWith(thinkingPicker.trigger);
 const queueBar = $("queue-bar");
 const modalRoot = $("modal-root");
 const menuRoot = $("menu-root");
 const menuBtn = $("btn-menu") as HTMLButtonElement;
 const jumpBtn = $("jump-latest") as HTMLButtonElement;
 const connError = $("conn-error");
+const crumbProject = $("crumb-project") as HTMLButtonElement;
+const searchClear = $("search-clear") as HTMLButtonElement;
+const searchHint = $("search-hint");
+const composerHint = $("composer-hint");
+const attachBtn = $("btn-attach") as HTMLButtonElement;
+const fileInput = $("file-input") as HTMLInputElement;
+const sidebarBtn = $("btn-sidebar") as HTMLButtonElement;
+
+// Platform-aware modifier label for hints (⌘ on Apple, Ctrl elsewhere).
+const IS_MAC = /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
+const MOD = IS_MAC ? "⌘" : "Ctrl+";
+const kbd = (k: string) => `${MOD}${k}`;
+searchHint.textContent = kbd("K");
+$("btn-settings").title = `Settings (${kbd(",")})`;
 
 // ---------- state ----------
 let activeName = "";
@@ -154,16 +195,18 @@ function scrollBottom(force = false) {
   });
 }
 
-// ---------- notices ----------
+// ---------- notices (floating toasts: never shift the transcript) ----------
+const X_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg>`;
 function notify(opts: { text: string; kind?: "info" | "error"; sticky?: boolean; retryLabel?: string; onRetry?: () => void; details?: string }) {
   const el = document.createElement("div");
   el.className = "notice" + (opts.kind === "error" ? " error" : "");
+  el.setAttribute("role", opts.kind === "error" ? "alert" : "status");
   const body = document.createElement("div");
   body.className = "n-body";
   const span = document.createElement("span");
   span.textContent = opts.text;
   body.appendChild(span);
-  if (opts.details) {
+  if (opts.details && opts.details !== opts.text && !opts.text.includes(opts.details)) {
     const det = document.createElement("details");
     const sum = document.createElement("summary");
     sum.textContent = "Details";
@@ -176,26 +219,47 @@ function notify(opts: { text: string; kind?: "info" | "error"; sticky?: boolean;
   el.appendChild(body);
   const actions = document.createElement("div");
   actions.className = "n-actions";
+  const dismiss = () => {
+    if (timer !== null) clearTimeout(timer);
+    el.classList.add("leaving");
+    // Removal follows the fade; with reduced motion there is no transition.
+    const gone = () => el.remove();
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) gone();
+    else { el.addEventListener("transitionend", gone, { once: true }); setTimeout(gone, 250); }
+  };
   if (opts.onRetry) {
     const r = document.createElement("button");
     r.type = "button";
+    r.className = "n-act";
     r.textContent = opts.retryLabel ?? "Retry";
     r.onclick = () => {
-      el.remove();
+      dismiss();
       opts.onRetry?.();
     };
     actions.appendChild(r);
   }
   const x = document.createElement("button");
   x.type = "button";
-  x.textContent = "Dismiss";
+  x.className = "n-x";
+  x.innerHTML = X_ICON;
+  x.title = "Dismiss";
   x.setAttribute("aria-label", "Dismiss notice");
-  x.onclick = () => el.remove();
+  x.onclick = dismiss;
   actions.appendChild(x);
   el.appendChild(actions);
+  // Keep the stack short: the oldest non-error toast makes room.
+  const live = noticesEl.querySelectorAll(".notice:not(.leaving)");
+  if (live.length >= 4) (Array.from(live).find((n) => !n.classList.contains("error")) ?? live[0]).remove();
   noticesEl.appendChild(el);
-  if (!opts.sticky && opts.kind !== "error") {
-    setTimeout(() => el.remove(), 6000);
+  let timer: number | null = null;
+  // Errors stay until dismissed — unless the caller passes sticky:false
+  // because the error already has an inline home (a failed bubble's Retry).
+  if (opts.sticky === false || (!opts.sticky && opts.kind !== "error")) {
+    // One-shot per toast, paused while hovered so it can be read or acted on.
+    const arm = () => { timer = window.setTimeout(dismiss, 6000); };
+    arm();
+    el.addEventListener("mouseenter", () => { if (timer !== null) { clearTimeout(timer); timer = null; } });
+    el.addEventListener("mouseleave", () => { if (timer === null && el.isConnected) arm(); });
   }
 }
 
@@ -219,6 +283,7 @@ function hideConnError() {
 // ---------- menus ----------
 interface MenuItem {
   label: string;
+  hint?: string;
   checked?: boolean;
   title?: string;
   onPick: () => void;
@@ -264,6 +329,12 @@ function openMenu(items: (MenuItem | "sep")[], at?: { left: number; top: number 
     if (it.title) b.title = it.title;
     b.appendChild(check);
     b.appendChild(lab);
+    if (it.hint) {
+      const k = document.createElement("kbd");
+      k.className = "menu-kbd";
+      k.textContent = it.hint;
+      b.appendChild(k);
+    }
     b.onclick = () => {
       closeMenu();
       it.onPick();
@@ -282,7 +353,7 @@ function openMenu(items: (MenuItem | "sep")[], at?: { left: number; top: number 
     menu.style.top = `${r.bottom + 6}px`;
     menu.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
   }
-  menuBtn.setAttribute("aria-expanded", "true");
+  if (!at) menuBtn.setAttribute("aria-expanded", "true");
   let idx = 0;
   buttons[0]?.focus();
   menu.addEventListener("keydown", (e) => {
@@ -324,7 +395,7 @@ function openHeaderMenu() {
     { label: "Session details", onPick: openSessionDetails },
     { label: "Compact context", onPick: doCompact },
     { label: "Export conversation", onPick: doExport },
-    { label: "Rename chat", onPick: openRename },
+    { label: "Rename chat", hint: kbd("R"), onPick: startInlineRename },
     "sep",
     {
       label: "Show tool activity",
@@ -344,6 +415,9 @@ function openHeaderMenu() {
         renderSettled();
       },
     },
+    "sep",
+    { label: "Keyboard shortcuts", hint: kbd("/"), onPick: openShortcuts },
+    { label: "Settings", hint: kbd(","), onPick: openSettings },
   ]);
 }
 menuBtn.onclick = (e) => {
@@ -351,8 +425,72 @@ menuBtn.onclick = (e) => {
   if (menuRoot.innerHTML) closeMenu();
   else openHeaderMenu();
 };
-chatTitle.title = "Double-click to rename";
-chatTitle.ondblclick = () => { if (!booting && !bootError) openRename(); };
+chatTitle.ondblclick = () => { if (!booting && !bootError) startInlineRename(); };
+
+// ---------- title: header breadcrumb, window title, inline rename ----------
+let titleEditing = false, extTitle = false;
+function currentTitle(): string { return activeName || deriveTitle() || "New chat"; }
+function renderTitle() {
+  const t = currentTitle();
+  if (!titleEditing && chatTitle.textContent !== t) chatTitle.textContent = t;
+  chatTitle.title = `${t} — double-click to rename (${kbd("R")})`;
+  const proj = cwd ? baseName(cwd) : "";
+  if (crumbProject.textContent !== proj) crumbProject.textContent = proj;
+  crumbProject.title = cwd ? `Project: ${cwd} — click to start a chat elsewhere` : "";
+  updateDocTitle();
+}
+// The OS window title names the chat (⌘-Tab, Mission Control), with a dot
+// while a turn runs. An extension's setTitle wins until the app restarts.
+function updateDocTitle() {
+  if (extTitle) return;
+  const t = `${streaming ? "● " : ""}${currentTitle()} — pi`;
+  if (document.title !== t) document.title = t;
+}
+crumbProject.onclick = () => openProjectPickerModal(cwd, "Start chat here", (dir) => { void pickProjectDir(dir); });
+function startInlineRename() {
+  if (titleEditing) { chatTitle.querySelector("input")?.focus(); return; }
+  titleEditing = true;
+  chatTitle.classList.add("editing");
+  const inp = document.createElement("input");
+  inp.className = "title-edit";
+  inp.value = activeName || deriveTitle();
+  inp.placeholder = "Name this chat";
+  inp.setAttribute("aria-label", "Chat name");
+  inp.spellcheck = false;
+  chatTitle.replaceChildren(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = async (save: boolean) => {
+    if (done) return;
+    done = true;
+    titleEditing = false;
+    chatTitle.classList.remove("editing");
+    const name = inp.value.trim();
+    const changed = save && !!name && name !== activeName;
+    const before = activeName;
+    if (changed) activeName = name; // optimistic: the header never flickers back
+    chatTitle.textContent = "";
+    renderTitle();
+    if (document.activeElement === document.body || !document.activeElement) inputEl.focus();
+    if (!changed) return;
+    try {
+      await invokeScoped("pi_set_name", { name });
+      await refreshState();
+      await refreshSessions();
+    } catch (e) {
+      activeName = before;
+      renderTitle();
+      notify({ text: `Rename failed: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: startInlineRename });
+    }
+  };
+  inp.addEventListener("keydown", (e) => {
+    if (e.isComposing) return;
+    if (e.key === "Enter") { e.preventDefault(); void finish(true); inputEl.focus(); }
+    else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); void finish(false); inputEl.focus(); }
+  });
+  inp.addEventListener("blur", () => void finish(true));
+}
 
 // ---------- modals (accessible dialog, focus trap + restore) ----------
 let modalPrevFocus: HTMLElement | null = null;
@@ -363,13 +501,14 @@ function closeModal() {
     modalPrevFocus = null;
   }
 }
-function openModal(title: string, build: (body: HTMLElement, close: () => void) => void, opts?: { wide?: boolean }) {
+function openModal(title: string, build: (body: HTMLElement, close: () => void) => void, opts?: { wide?: boolean; focusBox?: boolean; className?: string }) {
   modalPrevFocus = document.activeElement as HTMLElement;
   modalRoot.innerHTML = "";
   const back = document.createElement("div");
   back.className = "modal-back";
   const box = document.createElement("div");
-  box.className = "modal" + (opts?.wide ? " wide" : "");
+  box.className = "modal" + (opts?.wide ? " wide" : "") + (opts?.className ? ` ${opts.className}` : "");
+  box.tabIndex = -1;
   box.setAttribute("role", "dialog");
   box.setAttribute("aria-modal", "true");
   box.setAttribute("aria-label", title);
@@ -403,50 +542,188 @@ function openModal(title: string, build: (body: HTMLElement, close: () => void) 
       first.focus();
     }
   });
-  const firstInput = box.querySelector<HTMLElement>("input, select, textarea, button");
+  // Text fields take focus; reading surfaces (settings, shortcuts) focus the
+  // box itself so no button opens wearing a focus ring.
+  const firstInput = opts?.focusBox ? box : box.querySelector<HTMLElement>("input, select, textarea, button");
   setTimeout(() => firstInput?.focus(), 20);
 }
 
+// Settings: appearance, transcript display, project folder, shortcuts.
+// Every toggle applies immediately (no Save for preferences); only the
+// folder change, which navigates, waits for an explicit action.
 function openSettings() {
   openModal("Settings", (box, close) => {
-    const p = document.createElement("p");
-    p.className = "muted";
-    p.textContent = "Choose the project you want to work on.";
-    const lab = document.createElement("label");
-    lab.textContent = "Project folder";
-    lab.setAttribute("for", "m-cwd");
+    const section = (title: string) => {
+      const h = document.createElement("div");
+      h.className = "set-head";
+      h.textContent = title;
+      box.appendChild(h);
+    };
+    // Appearance: segmented System / Light / Dark.
+    section("Appearance");
+    const seg = document.createElement("div");
+    seg.className = "segmented";
+    seg.setAttribute("role", "radiogroup");
+    seg.setAttribute("aria-label", "Theme");
+    const pref = () => document.documentElement.dataset.themePreference ?? "system";
+    const segBtns: HTMLButtonElement[] = [];
+    for (const [val, label] of [["system", "System"], ["light", "Light"], ["dark", "Dark"]] as const) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.setAttribute("role", "radio");
+      b.textContent = label;
+      b.dataset.val = val;
+      b.onclick = () => {
+        setThemePreference(val);
+        for (const o of segBtns) o.setAttribute("aria-checked", String(o.dataset.val === val));
+      };
+      b.setAttribute("aria-checked", String(pref() === val));
+      segBtns.push(b);
+      seg.appendChild(b);
+    }
+    box.appendChild(seg);
+
+    section("Transcript");
+    const toggle = (label: string, desc: string, get: () => boolean, set: (on: boolean) => void) => {
+      const row = document.createElement("label");
+      row.className = "set-toggle";
+      const text = document.createElement("span");
+      text.className = "set-toggle-text";
+      const l = document.createElement("span");
+      l.textContent = label;
+      const d = document.createElement("span");
+      d.className = "set-desc";
+      d.textContent = desc;
+      text.append(l, d);
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.className = "switch";
+      cb.checked = get();
+      cb.onchange = () => set(cb.checked);
+      row.append(text, cb);
+      box.appendChild(row);
+    };
+    toggle("Show tool activity", "Tool calls appear as compact rows. Failures always show.",
+      () => !document.body.classList.contains("hide-tools"),
+      (on) => { document.body.classList.toggle("hide-tools", !on); prefSet("pi-hide-tools", on ? "0" : "1"); renderSettled(); });
+    toggle("Quiet mode", "Only pi's words: hides routine tools and thinking.",
+      () => document.body.classList.contains("quiet"),
+      (on) => { document.body.classList.toggle("quiet", on); prefSet("pi-quiet", on ? "1" : "0"); renderSettled(); });
+
+    section("Project folder");
+    const pathRow = document.createElement("div");
+    pathRow.className = "path-row";
     const inp = document.createElement("input");
     inp.id = "m-cwd";
     inp.value = cwd;
+    inp.spellcheck = false;
+    inp.setAttribute("aria-label", "Project folder");
+    const browse = document.createElement("button");
+    browse.type = "button";
+    browse.className = "btn";
+    browse.textContent = "Browse…";
+    browse.onclick = () => { close(); openProjectPickerModal(cwd, "Open project", (dir) => { void setCwd(dir); }); };
+    pathRow.append(inp, browse);
+    box.appendChild(pathRow);
     const hint = document.createElement("p");
     hint.className = "muted";
     hint.textContent = "Switches to that folder's chats. Running chats keep running. Drafts stay with their original chat.";
+    box.appendChild(hint);
+
     const row = document.createElement("div");
     row.className = "dialog-actions";
+    const keys = document.createElement("button");
+    keys.type = "button";
+    keys.className = "left";
+    keys.textContent = "Keyboard shortcuts";
+    keys.onclick = () => { close(); openShortcuts(); };
     const c = document.createElement("button");
     c.type = "button";
-    c.textContent = "Cancel";
+    c.textContent = "Done";
     c.onclick = close;
     const s = document.createElement("button");
     s.type = "button";
-    s.textContent = "Save";
+    s.textContent = "Open folder";
     s.className = "primary";
+    const sync = () => { s.disabled = !inp.value.trim() || inp.value.trim() === cwd; };
+    sync();
+    inp.addEventListener("input", sync);
     s.onclick = async () => {
       const ncwd = inp.value.trim();
       close();
       if (ncwd && ncwd !== cwd) await setCwd(ncwd);
     };
-    row.appendChild(c);
-    row.appendChild(s);
-    box.appendChild(p);
-    box.appendChild(lab);
-    box.appendChild(inp);
-    box.appendChild(hint);
+    row.append(keys, c, s);
     box.appendChild(row);
     inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) s.click();
+      if (e.key === "Enter" && !e.isComposing && !s.disabled) s.click();
     });
-  });
+  }, { focusBox: true });
+}
+
+function openShortcuts() {
+  openModal("Keyboard shortcuts", (box, close) => {
+    const groups: [string, [string, string][]][] = [
+      ["Chats", [
+        [kbd("N"), "New chat"],
+        [kbd("K"), "Search chats"],
+        ["↑ ↓ · Enter", "Move through results · open"],
+        [kbd("R"), "Rename this chat"],
+        [kbd("B"), "Show / hide sidebar"],
+      ]],
+      ["Composer", [
+        ["Enter", "Send (steers while pi works)"],
+        ["⇧ Enter", "New line"],
+        ["↑", "Recall your last message (empty composer)"],
+        ["/ or $", "Insert a skill"],
+        [kbd("⇧M"), "Pick model"],
+        [kbd("⇧T"), "Pick thinking level"],
+        ["Esc", "Stop the running turn"],
+      ]],
+      ["Requests from pi", [
+        ["Y · N", "Answer a yes/no request"],
+        ["Esc", "Cancel the request"],
+      ]],
+      ["App", [
+        [kbd(","), "Settings"],
+        [kbd("/"), "This list"],
+      ]],
+    ];
+    const grid = document.createElement("div");
+    grid.className = "keys-grid";
+    box.appendChild(grid);
+    for (const [title, rows] of groups) {
+      const col = document.createElement("section");
+      grid.appendChild(col);
+      const h = document.createElement("div");
+      h.className = "set-head";
+      h.textContent = title;
+      col.appendChild(h);
+      const dl = document.createElement("dl");
+      dl.className = "keys";
+      for (const [k, v] of rows) {
+        const dt = document.createElement("dt");
+        for (const part of k.split(" · ")) {
+          const el = document.createElement("kbd");
+          el.textContent = part;
+          dt.appendChild(el);
+        }
+        const dd = document.createElement("dd");
+        dd.textContent = v;
+        dl.append(dt, dd);
+      }
+      col.appendChild(dl);
+    }
+    const row = document.createElement("div");
+    row.className = "dialog-actions";
+    const done = document.createElement("button");
+    done.type = "button";
+    done.className = "primary";
+    done.textContent = "Done";
+    done.onclick = close;
+    row.appendChild(done);
+    box.appendChild(row);
+  }, { wide: true, focusBox: true, className: "keys-modal" });
 }
 
 function rowName(project: string, path: string): string {
@@ -527,7 +804,7 @@ async function openSessionDetails() {
           ["session", String((st.sessionName as string) ?? (st.sessionId as string) ?? "—")],
           ["model", model ? `${model.provider}/${model.id}` : "—"],
           ["messages", String(Number(st.messageCount ?? messages.length ?? 0))],
-          ["thinking", String((st.thinkingLevel as string) ?? thinkingSelect.value)],
+          ["thinking", String((st.thinkingLevel as string) ?? thinkingPicker.state.value ?? "—")],
           ["input tok", tokens ? String(tokens.input ?? "—") : "—"],
           ["output tok", tokens ? String(tokens.output ?? "—") : "—"],
           ["cost", `$${Number((stats.cost as number) ?? 0).toFixed(4)}`],
@@ -1463,6 +1740,8 @@ chatListEl.addEventListener("keydown", (e) => {
   if (items.length === 0) return;
   e.preventDefault();
   const i = items.indexOf(document.activeElement as HTMLButtonElement);
+  // ↑ from the first result returns to search when it holds a query.
+  if (e.key === "ArrowUp" && i === 0 && searchEl.value) { searchEl.focus(); return; }
   const next = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
   items[next].focus();
 });
@@ -1721,14 +2000,14 @@ type Block =
   | { t: "thinking"; text: string; key: string }
   | { t: "tool"; id: string; name: string; args: unknown; output: string; isError: boolean; key: string; state?: string }
   | { t: "bash"; command: string; output: string; exitCode: number; key: string }
-  | { t: "user"; text: string; images: { data: string; mime: string }[]; key: string; failed?: FailedSend };
+  | { t: "user"; text: string; images: { data: string; mime: string }[]; key: string; failed?: FailedSend; ts?: number };
 function blocks(): Block[] {
   const out: Block[] = [];
   const results = new Map(messages.filter(m => m.role === "toolResult").map(m => [m.toolCallId, m]));
   const calls = new Set<string>();
   messages.forEach((m, i) => {
     const key = `m-${i}`;
-    if (m.role === "user") out.push({ t: "user", key, text: msgText(m), images: imgsOf(m) });
+    if (m.role === "user") out.push({ t: "user", key, text: msgText(m), images: imgsOf(m), ts: typeof m.timestamp === "number" && m.timestamp > 1e11 ? m.timestamp : undefined });
     if (m.role === "assistant" || (m.role === "custom" && m.display !== false)) {
       const content = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content ?? [];
       content.forEach((c, ci) => {
@@ -1769,7 +2048,7 @@ function toolDisclosure(initial: Extract<Block, {t: "tool"}>): HTMLElement {
   let b = initial, showFull = false;
   const wrap = document.createElement("div"); wrap.className = "tool-disclosure";
   const btn = document.createElement("button"); btn.type = "button"; btn.className = "tool-toggle";
-  btn.innerHTML = chevSvg() + '<span class="t-state"></span><span class="t-summary"></span>';
+  btn.innerHTML = chevSvg() + '<span class="t-state"></span><span class="t-summary"><span class="t-lead"></span><span class="t-rest"></span></span>';
   btn.dataset.tool = b.key;
   const detail = document.createElement("div"); detail.className = "tool-detail";
   const args = document.createElement("pre"); args.className = "tool-args";
@@ -1783,8 +2062,11 @@ function toolDisclosure(initial: Extract<Block, {t: "tool"}>): HTMLElement {
     wrap.dataset.routine = String(!b.isError); wrap.dataset.failed = String(b.isError);
     btn.dataset.state = b.state ?? (b.isError ? "failed" : "done");
     const summary = toolSummary(b.name, b.args);
-    const label = `${summary.lead}${summary.rest ? " · " + summary.rest.slice(0, 90) : ""}${b.isError ? " · failed" : ""}`;
-    const lab = btn.querySelector(".t-summary")!; if (lab.textContent !== label) lab.textContent = label;
+    const rest = `${summary.rest ? summary.rest.slice(0, 90) : ""}${b.isError ? (summary.rest ? " · failed" : "failed") : ""}`;
+    const lead = btn.querySelector(".t-lead")!, restEl = btn.querySelector(".t-rest")!;
+    if (lead.textContent !== summary.lead) lead.textContent = summary.lead;
+    if (restEl.textContent !== rest) restEl.textContent = rest;
+    btn.title = summary.rest ? `${summary.lead} · ${summary.rest}` : summary.lead;
     const a = typeof b.args === "string" ? b.args : JSON.stringify(b.args ?? {}, null, 2);
     if (args.textContent !== a) args.textContent = a;
     args.classList.toggle("hidden", !a || a === "{}");
@@ -1803,6 +2085,10 @@ function bashDisclosure(b: Extract<Block, {t: "bash"}>): HTMLElement {
   return toolDisclosure({ t: "tool", id: b.key, key: b.key, name: "bash", args: { command: b.command }, output: b.output, isError: b.exitCode !== 0, state: b.exitCode ? "failed" : "done" });
 }
 
+function thinkLabel(text: string): string {
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  return words ? `Thinking · ${words.toLocaleString()} word${words === 1 ? "" : "s"}` : "Thinking";
+}
 function thinkDisclosure(text: string, key: string): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "think-disclosure";
@@ -1814,7 +2100,8 @@ function thinkDisclosure(text: string, key: string): HTMLElement {
   btn.setAttribute("aria-expanded", String(open));
   btn.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>`;
   const lab = document.createElement("span");
-  lab.textContent = "Thinking";
+  lab.className = "think-label";
+  lab.textContent = thinkLabel(text);
   btn.appendChild(lab);
   const body = document.createElement("div");
   body.className = "think-body" + (open ? " open" : "");
@@ -1958,6 +2245,20 @@ function linkifyPaths(root: ParentNode) {
     n.replaceWith(frag);
   }
 }
+// Markdown links: a webview ignores target=_blank, so hand http(s) links to
+// the OS opener (granted by opener:default). The browser preview falls back.
+messagesInner.addEventListener("click", async (e) => {
+  const a = (e.target as HTMLElement).closest("a[href]") as HTMLAnchorElement | null;
+  if (!a) return;
+  const href = a.getAttribute("href") ?? "";
+  if (!/^https?:\/\//i.test(href)) return;
+  e.preventDefault();
+  try {
+    await invoke("plugin:opener|open_url", { url: href });
+  } catch {
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+});
 messagesInner.addEventListener("click", async (e) => {
   const b = (e.target as HTMLElement).closest("[data-open-path]") as HTMLElement | null;
   if (!b) return;
@@ -1988,33 +2289,58 @@ function assistantTextBlock(text: string, key: string, images?: { data: string; 
     img.addEventListener("click", () => img.classList.toggle("full"));
     div.appendChild(img);
   }
-  const row = document.createElement("div");
-  row.className = "msg-copy-row";
-  const copy = document.createElement("button");
-  copy.type = "button";
-  copy.className = "copy-btn";
-  copy.textContent = "Copy";
-  copy.setAttribute("aria-label", "Copy message");
   fullTextByKey.set(key, text);
-  copy.onclick = async () => {
-    try {
-      await navigator.clipboard.writeText(fullTextByKey.get(key) ?? "");
-      copy.textContent = "Copied";
-      setTimeout(() => (copy.textContent = "Copy"), 1200);
-    } catch {
-      copy.textContent = "Copy failed";
-      setTimeout(() => (copy.textContent = "Copy"), 1200);
-    }
-  };
-  row.appendChild(copy);
-  div.appendChild(row);
+  if (text) {
+    const row = document.createElement("div");
+    row.className = "msg-actions";
+    row.appendChild(gutterButton(COPY_ICON, "Copy message", (b) => copyWithFeedback(b, fullTextByKey.get(key) ?? "")));
+    div.appendChild(row);
+  }
   return div;
 }
 
-function userBlock(text: string, images: { data: string; mime: string }[], failed: string | null, onRetry?: () => void): HTMLElement {
+// Gutter actions: icon buttons beside a message that take no layout space.
+const COPY_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6A1.5 1.5 0 0 0 14 4.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></svg>`;
+const CHECK_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>`;
+const EDIT_ICON = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 19.5h4l10-10a2.1 2.1 0 0 0-3-3l-10 10Z"/><path d="m13.5 8 2.5 2.5"/></svg>`;
+function gutterButton(icon: string, label: string, onClick: (b: HTMLButtonElement) => void): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "gutter-btn";
+  b.innerHTML = icon;
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.onclick = (e) => { e.stopPropagation(); onClick(b); };
+  return b;
+}
+async function copyWithFeedback(b: HTMLButtonElement, text: string) {
+  const icon = b.innerHTML, label = b.title;
+  try {
+    await navigator.clipboard.writeText(text);
+    b.innerHTML = CHECK_ICON;
+    b.title = "Copied";
+    b.classList.add("ok");
+  } catch {
+    b.title = "Copy failed";
+  }
+  setTimeout(() => { b.innerHTML = icon; b.title = label; b.classList.remove("ok"); }, 1200);
+}
+
+function userBlock(text: string, images: { data: string; mime: string }[], failed: string | null, onRetry?: () => void, ts?: number): HTMLElement {
   const wrap = document.createElement("div");
   wrap.className = "user-block";
   const col = document.createElement("div");
+  col.className = "user-col";
+  if (ts) col.title = `Sent ${new Date(ts).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`;
+  if (text && !failed) {
+    const acts = document.createElement("div");
+    acts.className = "msg-actions user-actions";
+    acts.append(
+      gutterButton(EDIT_ICON, "Edit in composer", () => putInComposer(text)),
+      gutterButton(COPY_ICON, "Copy message", (b) => copyWithFeedback(b, text)),
+    );
+    col.appendChild(acts);
+  }
   col.style.maxWidth = text.length < 140 && !text.includes("\n") ? "80%" : "100%";
   if (text) {
     const b = document.createElement("div");
@@ -2079,7 +2405,7 @@ function chatContextBar(): HTMLElement {
   pb.title = `Project folder: ${cwd} — click to change`;
   pb.setAttribute("aria-label", `Project ${baseName(cwd)}. Activate to change project.`);
   pb.onclick = () => openProjectPickerModal(cwd, "Start chat here", (dir) => { void pickProjectDir(dir); });
-  bar.appendChild(pb);
+  if (cwd) bar.appendChild(pb);
   const groups = loadGroups();
   const ap = activePath;
   const memberOf = ap ? Object.keys(groups).filter((n) => groups[n].includes(ap)) : [];
@@ -2121,45 +2447,129 @@ function openGroupPicker(anchor: HTMLElement) {
   openMenu(items, { left: r.left, top: r.bottom + 6 }, "Choose groups");
 }
 function renderChatContext() { chatContextEl.replaceChildren(chatContextBar()); }
+// Boot: a skeleton of the transcript instead of a spinner (AGENTS: no
+// spinners where a skeleton will do). Static — no shimmer animation.
+function bootSkeleton(): HTMLElement {
+  const d = document.createElement("div");
+  d.className = "loading-state";
+  d.setAttribute("aria-label", "Starting pi");
+  d.setAttribute("role", "status");
+  const user = document.createElement("div");
+  user.className = "skel skel-user";
+  d.appendChild(user);
+  for (const w of [92, 78, 85, 40]) {
+    const l = document.createElement("div");
+    l.className = "skel";
+    l.style.width = `${w}%`;
+    d.appendChild(l);
+  }
+  const label = document.createElement("p");
+  label.className = "skel-label";
+  label.textContent = "Starting pi…";
+  d.appendChild(label);
+  return d;
+}
+function bootFailure(err: string): HTMLElement {
+  const d = document.createElement("div"); d.className = "empty-state";
+  const title = document.createElement("h2"); title.textContent = "Couldn't connect to pi";
+  const desc = document.createElement("p"); desc.className = "empty-folder";
+  desc.textContent = "Your draft is kept. Check that `pi` is on your PATH, then retry.";
+  d.append(title, desc);
+  if (err) {
+    const det = document.createElement("pre"); det.className = "empty-error"; det.textContent = err;
+    d.append(det);
+  }
+  const row = document.createElement("div"); row.className = "empty-actions";
+  const b = document.createElement("button"); b.type = "button"; b.className = "primary"; b.textContent = "Retry connection"; b.onclick = () => boot(true);
+  row.append(b); d.append(row);
+  return d;
+}
+// Empty chat: teach. Starter prompts fill the composer (never auto-send) and
+// a quiet row of shortcut tips shows what the keyboard can do.
+const STARTERS = ["Explain this project", "Review recent changes", "Find and fix a bug", "Write tests for…"];
+function emptyState(): HTMLElement {
+  const d = document.createElement("div"); d.className = "empty-state";
+  const h = document.createElement("h2"); h.textContent = "What would you like to work on?";
+  const f = document.createElement("div"); f.className = "empty-folder";
+  f.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h5l2 2.5h8A1.5 1.5 0 0 1 21 9v8.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z"/></svg>`;
+  const fp = document.createElement("span"); fp.textContent = cwd; f.appendChild(fp); f.title = cwd;
+  const branch = branchCache.get(cwd);
+  if (branch) { const bs = document.createElement("span"); bs.className = "empty-branch"; bs.textContent = `\u2387 ${branch}`; f.appendChild(bs); }
+  const row = document.createElement("div"); row.className = "empty-actions";
+  for (const text of STARTERS) {
+    const b = document.createElement("button"); b.type = "button"; b.textContent = text;
+    b.onclick = () => {
+      inputEl.value = text.endsWith("…") ? text.slice(0, -1) + " " : text;
+      saveDraft(); autosize(); updateSendState(); inputEl.focus();
+      inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
+    };
+    row.append(b);
+  }
+  const tips = document.createElement("div"); tips.className = "empty-tips";
+  for (const [k, v] of [[kbd("K"), "search chats"], ["/", "skills"], ["↑", "last message"], [kbd("/"), "all shortcuts"]] as const) {
+    const t = document.createElement("span");
+    const kk = document.createElement("kbd"); kk.textContent = k;
+    t.append(kk, ` ${v}`);
+    tips.append(t);
+  }
+  d.append(h, f, row, tips);
+  return d;
+}
+// Live tail: while a turn runs and no prose is streaming, a quiet line at the
+// end of the transcript says what pi is doing. CSS-only pulse, removed on settle.
+const liveTail = document.createElement("div");
+liveTail.className = "live-tail";
+liveTail.setAttribute("aria-hidden", "true");
+liveTail.innerHTML = `<span class="dots"><i></i><i></i><i></i></span><span class="live-label"></span>`;
+const liveLabel = liveTail.querySelector(".live-label") as HTMLElement;
+function syncLiveIndicators(list: Block[]) {
+  const last = list[list.length - 1];
+  const writing = streaming && !stopping && last?.t === "text" && !!last.text && !last.key.endsWith("-stopped") && !last.key.endsWith("-error");
+  for (const n of messagesInner.querySelectorAll(".assistant-block.streaming")) {
+    if (!writing || n !== rendered.get(last.key)?.node) n.classList.remove("streaming");
+  }
+  if (writing) rendered.get(last.key)?.node.classList.add("streaming");
+  const showTail = streaming && !writing && !dialogs.size;
+  if (showTail) {
+    const l = statusLine.textContent || "Working…";
+    if (liveLabel.textContent !== l) liveLabel.textContent = l;
+    if (messagesInner.lastChild !== liveTail) messagesInner.appendChild(liveTail);
+  } else if (liveTail.isConnected) liveTail.remove();
+}
 function renderSettled() {
   renderChatContext();
   if (booting || bootError) {
     resetView();
-    const d = document.createElement("div"); d.className = "empty-state";
-    const title = document.createElement("h2"); title.textContent = booting ? "Starting pi…" : "Couldn't connect to pi";
-    const desc = document.createElement("p"); desc.className = "empty-folder"; desc.textContent = bootError ?? "Your workspace will be ready in a moment.";
-    d.append(title, desc);
-    if (bootError) { const b = document.createElement("button"); b.textContent = "Retry connection"; b.onclick = () => boot(true); d.append(b); }
-    messagesInner.append(d); return;
+    messagesInner.append(booting ? bootSkeleton() : bootFailure(bootError ?? ""));
+    return;
   }
   const list = blocks();
-  messagesInner.querySelector(".empty-state")?.remove();
+  messagesInner.querySelector(":scope > .loading-state")?.remove();
   if (!list.length) {
-    const d = document.createElement("div"); d.className = "empty-state";
-    const h = document.createElement("h2"); h.textContent = "What would you like to work on?";
-    const f = document.createElement("div"); f.className = "empty-folder"; f.textContent = cwd; f.title = cwd;
-    const row = document.createElement("div"); row.className = "empty-actions";
-    for (const text of ["Explain this project", "Review recent changes"]) {
-      const b = document.createElement("button"); b.type = "button"; b.textContent = text;
-      b.onclick = () => { inputEl.value = text; saveDraft(); autosize(); updateSendState(); inputEl.focus(); }; row.append(b);
-    }
-    d.append(h, f, row); messagesInner.append(d);
-  }
+    // Reuse the empty state while its inputs are unchanged, so unrelated
+    // re-renders (sidebar toggles, groups) never replay its entrance.
+    const sig = `${cwd}\n${branchCache.get(cwd) ?? ""}`;
+    const cur = messagesInner.querySelector<HTMLElement>(":scope > .empty-state");
+    if (!cur || cur.dataset.sig !== sig) { cur?.remove(); const e = emptyState(); e.dataset.sig = sig; messagesInner.append(e); }
+  } else messagesInner.querySelector(":scope > .empty-state")?.remove();
   const keep = new Set(list.map(b => b.key));
   for (const [key, view] of rendered) if (!keep.has(key)) { view.node.remove(); rendered.delete(key); fullTextByKey.delete(key); }
   let cursor: ChildNode | null = messagesInner.firstChild;
   for (const b of list) {
     let view = rendered.get(b.key);
     if (!view || view.block.t !== b.t) {
-      const node = b.t === "user" ? userBlock(b.text, b.images, b.failed?.error ?? null, () => retrySend(b.failed!)) :
+      const node = b.t === "user" ? userBlock(b.text, b.images, b.failed?.error ?? null, () => retrySend(b.failed!), b.ts) :
         b.t === "text" ? assistantTextBlock(b.text, b.key, b.images) : b.t === "thinking" ? thinkDisclosure(b.text, b.key) : b.t === "tool" ? toolDisclosure(b) : bashDisclosure(b);
       view?.node.replaceWith(node); view = { node, block: b }; rendered.set(b.key, view);
       node.dataset.blockKey = b.key;
       node.setAttribute("role", "group"); node.setAttribute("aria-label", b.t === "user" ? "Your message" : b.t === "text" ? "pi response" : b.t === "thinking" ? "pi thinking" : "Tool activity");
     } else if (!sameBlock(view.block, b)) {
-      if (b.t === "user") { const n = userBlock(b.text, b.images, b.failed?.error ?? null, () => retrySend(b.failed!)); n.dataset.blockKey = b.key; view.node.replaceWith(n); view.node = n; }
+      if (b.t === "user") { const n = userBlock(b.text, b.images, b.failed?.error ?? null, () => retrySend(b.failed!), b.ts); n.dataset.blockKey = b.key; view.node.replaceWith(n); view.node = n; }
       if (b.t === "tool") updateTool.get(view.node)?.(b);
-      if (b.t === "thinking") { const body = view.node.querySelector(".think-body"); if (body && body.textContent !== b.text) body.textContent = b.text; }
+      if (b.t === "thinking") {
+        const body = view.node.querySelector(".think-body"); if (body && body.textContent !== b.text) body.textContent = b.text;
+        const lab = view.node.querySelector(".think-label"); const l = thinkLabel(b.text); if (lab && lab.textContent !== l) lab.textContent = l;
+      }
       if (b.t === "text") {
         fullTextByKey.set(b.key, b.text);
         let md = view.node.querySelector<HTMLElement>(".md");
@@ -2173,6 +2583,7 @@ function renderSettled() {
     if (view.node !== cursor) messagesInner.insertBefore(view.node, cursor);
     cursor = view.node.nextSibling;
   }
+  syncLiveIndicators(list);
   scrollBottom(); updateJump();
   messagesInner.querySelectorAll<HTMLButtonElement>(".retry-btn").forEach(b => b.disabled = streaming || stopping || booting || !!bootError || !!sendInFlight);
 }
@@ -2270,7 +2681,10 @@ async function refreshBranch() {
   } catch {
     setBranch(dir, null);
   }
-  if (dir === cwd) renderBranch();
+  if (dir === cwd) {
+    renderBranch();
+    if (!messages.length && !booting && !bootError) renderSettled(); // empty state shows the branch
+  }
 }
 function renderStatus() {
   let label: string;
@@ -2281,10 +2695,12 @@ function renderStatus() {
   else if (dialogs.size > 0) label = activityLabel("waiting");
   else if (streaming) {
     label =
-      streamActivity === "running" ? activityLabel("running", streamActivityTool) : activityLabel("thinking");
+      streamActivity === "running" ? activityLabel("running", streamActivityTool)
+      : streamActivity === "writing" ? activityLabel("writing") : activityLabel("thinking");
   } else if (extStatus) label = extStatus;
   else label = activityLabel("idle");
   statusLine.textContent = label;
+  if (liveTail.isConnected && liveLabel.textContent !== label) liveLabel.textContent = label;
   runSpin.classList.toggle("hidden", !streaming);
   runSpin.setAttribute("aria-label", streaming ? label : "Idle");
 }
@@ -2300,11 +2716,16 @@ function updateSendState() {
   const conn = !booting && !bootError && !navigating;
   queueBtn.disabled = !ok || !conn || sendInFlight !== null;
   stopBtn.disabled = stopping || !conn;
-  modelSelect.disabled = !conn || streaming; thinkingSelect.disabled = !conn || streaming;
+  modelPicker.setState({ disabled: !conn || streaming }); thinkingPicker.setState({ disabled: !conn || streaming });
   inputEl.disabled = navigating;
   $("btn-new").toggleAttribute("disabled", !conn);
   chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn);
   sendBtn.disabled = !ok || !conn || sendInFlight !== null;
+  attachBtn.disabled = !conn;
+  const hint = streaming ? "↵ steer · ◷ queue · Esc stop" : "↵ send · ⇧↵ newline · / skills";
+  if (composerHint.textContent !== hint) composerHint.textContent = hint;
+  const ph = navigating ? "Opening chat…" : streaming ? "Steer pi while it works… (◷ queues for after)" : "Message pi…";
+  if (inputEl.placeholder !== ph) inputEl.placeholder = ph;
   if (!streaming) {
     sendBtn.setAttribute("aria-label", "Send message");
     sendBtn.title = "Send (Enter)";
@@ -2346,7 +2767,7 @@ function saveUnseen() {
     localStorage.setItem("pi-unseen-finished", JSON.stringify(arr));
   } catch { /* ignore */ }
 }
-function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); }
+function setBusy(b: boolean) { streaming = b; if (!b) stopping = false; updateSendState(); updateDocTitle(); }
 function clearRunScope(preserveDialogs = false) {
   pendingSend = null; sendInFlight = null; conversation.reset(); messages = conversation.messages;
   // A popover anchored to the chat scope must not outlive a chat switch.
@@ -2368,10 +2789,10 @@ function applyState(st: Record<string, unknown>) {
   activePath = stFile || null;
   cwdLabel.textContent = cwd.split("/").filter(Boolean).pop() ?? cwd; cwdBtn.title = cwd;
   activeName = String(st.sessionName ?? "");
-  chatTitle.textContent = activeName || deriveTitle() || "New chat";
+  renderTitle();
   renderBranch();
-  const level = String(st.thinkingLevel ?? thinkingSelect.value);
-  if ([...thinkingSelect.options].some(o => o.value === level)) thinkingSelect.value = level;
+  const level = typeof st.thinkingLevel === "string" ? st.thinkingLevel : null;
+  if (level && THINKING_LEVELS.some(o => o.value === level)) thinkingPicker.setState({ value: level });
   setBusy(st.isStreaming === true); renderProjects();
 }
 async function refreshState() {
@@ -2421,7 +2842,7 @@ async function refreshMessages() {
     const res = await invokeScoped<{messages: AgentMessage[]}>("pi_get_messages");
     if (gen !== bootGen || rev !== revision) return;
     conversation.reset(res.messages ?? []); messages = conversation.messages;
-    reconcileSend(); chatTitle.textContent = activeName || deriveTitle() || "New chat"; renderSettled();
+    reconcileSend(); renderTitle(); renderSettled();
   } catch (e) {
     if (gen === bootGen) notify({ text: `Couldn't load messages: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: refreshMessages });
   }
@@ -2445,25 +2866,14 @@ async function refreshModels() {
   try {
     const res = (await invokeScoped("pi_get_models")) as { models: { id: string; provider: string }[]; current: string | null };
     if (gen !== bootGen) return;
-    const cur = modelSelect.value;
-    modelSelect.innerHTML = "";
-    for (const m of res.models ?? []) {
-      const o = document.createElement("option");
-      o.value = `${m.provider}/${m.id}`;
-      o.textContent = `${m.provider}/${m.id}`;
-      o.title = `${m.provider}/${m.id}`;
-      modelSelect.appendChild(o);
-    }
-    if (modelSelect.options.length === 0) {
-      const o = document.createElement("option");
-      o.textContent = "default model";
-      modelSelect.appendChild(o);
-    } else if (res.current && [...modelSelect.options].some((o) => o.value === res.current)) {
-      modelSelect.value = res.current;
-    } else if (cur && [...modelSelect.options].some((o) => o.value === cur)) {
-      modelSelect.value = cur;
-    }
-    modelSelect.title = modelSelect.value || "Model";
+    // Grouped by provider; the trigger shows just the model id.
+    const items: PickerItem[] = (res.models ?? []).map((m) => ({
+      value: `${m.provider}/${m.id}`, label: m.id, group: m.provider, title: `${m.provider}/${m.id}`,
+    }));
+    items.sort((x, y) => (x.group ?? "").localeCompare(y.group ?? "") || 0);
+    const cur = modelPicker.state.value;
+    const has = (v: string | null) => !!v && items.some((i) => i.value === v);
+    modelPicker.setState({ items, value: has(res.current) ? res.current : has(cur) ? cur : null });
     modelsErrShown = false;
   } catch (e) {
     if (!modelsErrShown) {
@@ -2510,6 +2920,8 @@ function renderCtxCircle() {
     pct == null ? `0 ${RING_C.toFixed(1)}` : `${((pct / 100) * RING_C).toFixed(1)} ${RING_C.toFixed(1)}`
   );
   ctxCircle.classList.toggle("hot", pct != null && pct >= 80);
+  ctxCircle.classList.toggle("empty", pct == null);
+  ctxCircle.title = pct == null ? "Context usage — nothing reported yet" : `Context ${pct}% full`;
   ctxCircle.setAttribute(
     "aria-label",
     pct == null ? "Context usage unavailable" : `Context ${pct}% full. Activate for details.`
@@ -2644,6 +3056,7 @@ function openContextUsage() {
     box.appendChild(row);
   });
 }
+renderCtxCircle();
 ctxCircle.onclick = () => {
   if (popoverEl) closePopover();
   else openContextUsage();
@@ -2655,11 +3068,6 @@ async function refreshStats() {
     if (gen !== bootGen) return;
     lastUsage = s;
     renderCtxCircle();
-    const parts: string[] = [];
-    if (s.tokens) parts.push(`${((s.tokens.total ?? 0) / 1000).toFixed(1)}k tok`);
-    if (typeof s.cost === "number") parts.push(`$${s.cost.toFixed(4)}`);
-    if (s.contextUsage?.percent != null) parts.push(`${s.contextUsage.percent}% ctx`);
-    tokenLine.textContent = ""; // Full usage/cost lives in Session details.
     const pct = s.contextUsage?.percent ?? null;
     if (pct != null && pct >= 80) {
       ctxWarn.classList.remove("hidden");
@@ -2721,7 +3129,7 @@ function checkWatchdog() {
     failedBySession.set(owner, list);
     setBusy(false);
     renderSettled();
-    notify({ text: "Send timed out. Use Retry beside it; your newer draft is unchanged.", kind: "error" });
+    notify({ text: "Send timed out. Use Retry beside it; your newer draft is unchanged.", kind: "error", sticky: false });
   }
   if (navigating) {
     navigating = false;
@@ -2755,7 +3163,7 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
         if (pendingSend) pendingSend.owner = owner;
         await refreshSessions();
         adoptedUnlisted = sessions.some((s) => s.path === sf) ? null : `${cwd}:${sf}`;
-        chatTitle.textContent = activeName || deriveTitle() || "New chat";
+        renderTitle();
         renderProjects();
       }
       if (!st.isStreaming && pendingSend?.id === id) { pendingSend = null; setBusy(false); await refreshMessages(); }
@@ -2770,7 +3178,7 @@ async function submit(d: Draft, kind: "prompt" | "steer" | "follow_up") {
       if (pendingSend?.id === id) pendingSend = null;
       if (kind === "prompt") setBusy(false);
       renderSettled();
-      notify({ text: "Message wasn't sent. Use Retry beside it; your newer draft is unchanged.", kind: "error" });
+      notify({ text: "Message wasn't sent. Use Retry beside it; your newer draft is unchanged.", kind: "error", sticky: false });
     }
   } finally {
     if (sendInFlight === id) sendInFlight = null;
@@ -2895,7 +3303,7 @@ async function openSession(project: string, path: string | null) {
     // applyState may have retargeted before the throw: roll the scope back so
     // the (untouched) transcript and queue bar match the visible chat again.
     cwd = prevCwd; activePath = prevPath; activeName = prevName;
-    chatTitle.textContent = activeName || deriveTitle() || "New chat";
+    renderTitle();
     renderProjects(); renderChatContext(); renderQueue();
     notify({ text: `Couldn't open chat: ${String(e)}`, kind: "error", sticky: true, retryLabel: "Retry", onRetry: () => openSession(project, path) });
   } finally { targetScope = null; navigating = false; updateSendState(); disarmWatchdog(); if (!bootError && !dialogs.size) inputEl.focus(); }
@@ -2966,13 +3374,14 @@ function showExtensionDialog(req: PiEvent) {
   if (!["select", "confirm", "input", "editor"].includes(method)) {
     if (method === "notify") notify({ text: String(req.message ?? ""), kind: req.notifyType === "error" ? "error" : "info" });
     if (method === "setStatus") { extStatus = String(req.statusText ?? "").slice(0,120); renderStatus(); }
-    if (method === "setTitle" && typeof req.title === "string") document.title = req.title;
+    if (method === "setTitle" && typeof req.title === "string") { extTitle = true; document.title = req.title; }
     if (method === "set_editor_text" && typeof req.text === "string") { inputEl.value = req.text; saveDraft(); autosize(); updateSendState(); }
     return;
   }
   const id = String(req.id ?? ""); if (!id || dialogs.has(id)) return;
   const card = document.createElement("div");
   card.className = "dialog-card";
+  card.tabIndex = -1;
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-label", String(req.title ?? method));
   const title = document.createElement("div");
@@ -3023,21 +3432,36 @@ function showExtensionDialog(req: PiEvent) {
       d.textContent = msg;
       card.appendChild(d);
     }
+    // Yes / No only; Cancel stays one key away (Esc). Y and N answer from
+    // the keyboard, ignored for a beat after the card appears so a keystroke
+    // already in flight from the composer can never answer it.
     const row = document.createElement("div");
     row.className = "dialog-actions";
+    const esc = document.createElement("span");
+    esc.className = "dialog-hint";
+    esc.innerHTML = "<kbd>Esc</kbd> cancel";
     const no = document.createElement("button");
     no.type = "button";
-    no.textContent = "No";
+    no.innerHTML = `No <kbd>N</kbd>`;
+    no.setAttribute("aria-label", "No");
     no.onclick = () => respondUi(id, { confirmed: false });
     const yes = document.createElement("button");
     yes.type = "button";
-    yes.textContent = "Yes";
+    yes.innerHTML = `Yes <kbd>Y</kbd>`;
+    yes.setAttribute("aria-label", "Yes");
     yes.className = "primary";
     yes.onclick = () => respondUi(id, { confirmed: true });
-    row.appendChild(cancelBtn("Cancel"));
-    row.appendChild(no);
-    row.appendChild(yes);
+    row.append(esc, no, yes);
     card.appendChild(row);
+    const shownAt = performance.now();
+    card.addEventListener("keydown", (e) => {
+      if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing) return;
+      if ((e.target as HTMLElement).closest("input, textarea")) return;
+      if (performance.now() - shownAt < 400) return;
+      const k = e.key.toLowerCase();
+      if (k === "y") { e.preventDefault(); void respondUi(id, { confirmed: true }); }
+      else if (k === "n") { e.preventDefault(); void respondUi(id, { confirmed: false }); }
+    });
 
   } else if (method === "input" || method === "editor") {
     const pre = String(req.prefill ?? "");
@@ -3091,7 +3515,10 @@ function syncDialogs() {
   let first = true;
   for (const d of dialogs.values()) { d.card.classList.toggle("hidden", !first); first = false; }
   const next = dialogs.values().next().value as UiDialog | undefined;
-  if (next && next.id !== visibleDialogId) next.card.querySelector<HTMLElement>("input, textarea, button")?.focus({preventScroll:true});
+  // Never yank focus out of a half-typed composer: with Y/N live on the card,
+  // the next keystrokes of that message could answer the request.
+  const typing = document.activeElement === inputEl && inputEl.value.trim().length > 0;
+  if (next && next.id !== visibleDialogId && !typing) (next.card.querySelector<HTMLElement>("input, textarea") ?? next.card).focus({preventScroll:true});
   visibleDialogId = next?.id ?? null;
 }
 async function respondUi(id: string, payload: Record<string, unknown>) {
@@ -3191,15 +3618,23 @@ async function handleEvent(p: PiEvent) {
       unseenFinished.add(key); saveUnseen();
       await refreshAllProjects();
       const done = sessionLabel(key);
-      if (done) notify({ text: `Finished in ${done}.` });
+      const sep = key.indexOf(":");
+      if (done) notify({
+        text: `Finished in ${done}.`,
+        retryLabel: "Open",
+        onRetry: sep > 0 && !key.startsWith("cwdkey:") ? () => { void openSession(key.slice(0, sep), key.slice(sep + 1)); } : undefined,
+      });
     }
     return;
   }
   if (t.startsWith("message_") || t.startsWith("tool_execution_")) {
     ++revision; conversation.ingest(p); messages = conversation.messages; reconcileSend();
-    chatTitle.textContent = activeName || deriveTitle() || "New chat";
+    renderTitle();
     if (t === "tool_execution_start") { streamActivity = "running"; streamActivityTool = String(p.toolName ?? "tool"); }
-    if (t === "message_update") streamActivity = "thinking";
+    if (t === "message_update") {
+      const kind = String((p.assistantMessageEvent as Record<string, unknown> | undefined)?.type ?? "");
+      streamActivity = kind.startsWith("text_") ? "writing" : "thinking";
+    }
     if (t === "tool_execution_end" && p.isError) expandedTools.add(`tool-${p.toolCallId}`);
     renderStatus(); queueStreamUpdate();
   }
@@ -3231,6 +3666,12 @@ document.addEventListener("visibilitychange", () => {
 });
 
 // ---------- input ----------
+function putInComposer(text: string) {
+  inputEl.value = inputEl.value.trim() ? `${inputEl.value.replace(/\s+$/, "")}\n\n${text}` : text;
+  saveDraft(); autosize(); updateSendState();
+  inputEl.focus();
+  inputEl.selectionStart = inputEl.selectionEnd = inputEl.value.length;
+}
 function autosize() {
   inputEl.style.height = "auto";
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + "px";
@@ -3274,10 +3715,13 @@ function renderAttachments() {
   });
 }
 
+let attachErrTimer: number | null = null;
 function attachValidationError(text: string) {
   attachError.classList.remove("hidden");
   attachError.textContent = text;
-  setTimeout(() => {
+  if (attachErrTimer !== null) clearTimeout(attachErrTimer);
+  attachErrTimer = window.setTimeout(() => {
+    attachErrTimer = null;
     attachError.classList.add("hidden");
   }, 6000);
 }
@@ -3315,6 +3759,12 @@ function addImageFiles(files: FileList | File[]) {
   }
 }
 
+attachBtn.onclick = () => fileInput.click();
+fileInput.addEventListener("change", () => {
+  if (fileInput.files?.length) addImageFiles(fileInput.files);
+  fileInput.value = "";
+  inputEl.focus();
+});
 inputEl.addEventListener("paste", (e) => {
   const items = e.clipboardData?.items;
   if (!items) return;
@@ -3334,7 +3784,11 @@ composerWrap.addEventListener("dragover", (e) => {
     composerWrap.classList.add("drag");
   }
 });
-composerWrap.addEventListener("dragleave", () => composerWrap.classList.remove("drag"));
+composerWrap.addEventListener("dragleave", (e) => {
+  // Moving between children fires dragleave too; only leave when truly out.
+  if (e.relatedTarget instanceof Node && composerWrap.contains(e.relatedTarget)) return;
+  composerWrap.classList.remove("drag");
+});
 composerWrap.addEventListener("drop", (e) => {
   composerWrap.classList.remove("drag");
   if (e.dataTransfer?.files?.length) {
@@ -3449,6 +3903,16 @@ inputEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); acceptSkill(); return; }
     if (e.key === "Escape") { e.preventDefault(); hideSkillPop(); return; }
   }
+  // Shell-style recall: ↑ in an empty composer brings back your last message.
+  if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && inputEl.value === "" && pendingImages.length === 0) {
+    const last = [...messages].reverse().find((m) => m.role === "user");
+    const text = last ? msgText(last) : "";
+    if (text) {
+      e.preventDefault();
+      putInComposer(text);
+    }
+    return;
+  }
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     if (streaming) {
@@ -3486,6 +3950,13 @@ function setTheme(theme: "light" | "dark", persist: boolean) {
     prefSet("pi-theme", theme);
   }
   applyThemeLabel();
+}
+function setThemePreference(p: "system" | "light" | "dark") {
+  if (p === "system") {
+    document.documentElement.dataset.themePreference = "system";
+    try { localStorage.removeItem("pi-theme"); } catch { /* ignore */ }
+    setTheme(matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light", false);
+  } else setTheme(p, true);
 }
 themeBtn.onclick = () => {
   setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark", true);
@@ -3548,31 +4019,58 @@ sideGrip.addEventListener("dblclick", () => {
     /* ignore */
   }
 });
-cwdBtn.onclick = () => openSettings();
+// Focus mode: hide the sidebar entirely (no width animation — layout only).
+function applySidebar(hidden: boolean) {
+  document.body.classList.toggle("side-hidden", hidden);
+  const label = hidden ? `Show sidebar (${kbd("B")})` : `Hide sidebar (${kbd("B")})`;
+  sidebarBtn.title = label;
+  sidebarBtn.setAttribute("aria-label", label);
+  sidebarBtn.setAttribute("aria-pressed", String(hidden));
+}
+function toggleSidebar() {
+  const hidden = !document.body.classList.contains("side-hidden");
+  applySidebar(hidden);
+  prefSet("pi-sidebar-hidden", hidden ? "1" : "0");
+  if (hidden && sidebarEl.contains(document.activeElement)) inputEl.focus();
+}
+applySidebar(prefGet("pi-sidebar-hidden") === "1");
+sidebarBtn.onclick = toggleSidebar;
+cwdBtn.onclick = () => openProjectPickerModal(cwd, "Open project", (dir) => { void setCwd(dir); });
+cwdBtn.setAttribute("aria-label", "Change project folder");
 ($("btn-settings") as HTMLButtonElement).onclick = () => openSettings();
 
-modelSelect.onchange = async () => {
-  const [provider, ...rest] = modelSelect.value.split("/");
-  const modelId = rest.join("/");
-  modelSelect.title = modelSelect.value;
+async function setModel(value: string) {
+  const prev = modelPicker.state.value;
+  const [provider, ...rest] = value.split("/");
+  modelPicker.setState({ value }); // optimistic; rolled back below on failure
   try {
-    await invokeChecked("pi_set_model", { provider, modelId });
+    await invokeChecked("pi_set_model", { provider, modelId: rest.join("/") });
     await refreshState();
   } catch (e) {
+    modelPicker.setState({ value: prev });
     await refreshModels();
     notify({ text: `Couldn't switch model: ${String(e)}`, kind: "error", sticky: true, details: String(e) });
   }
-};
-thinkingSelect.onchange = async () => {
+}
+async function setThinking(level: string) {
+  const prev = thinkingPicker.state.value;
+  thinkingPicker.setState({ value: level });
   try {
-    await invokeChecked("pi_set_thinking", { level: thinkingSelect.value });
+    await invokeChecked("pi_set_thinking", { level });
   } catch (e) {
-    try { await refreshState(); } catch {}
+    thinkingPicker.setState({ value: prev });
+    try { await refreshState(); } catch { /* keep rollback */ }
     notify({ text: `Couldn't set thinking level: ${String(e)}`, kind: "error", sticky: true, details: String(e) });
   }
-};
+}
 
+function syncSearchChrome() {
+  const has = searchEl.value.length > 0;
+  searchClear.classList.toggle("hidden", !has);
+  searchHint.classList.toggle("hidden", has);
+}
 searchEl.addEventListener("input", () => {
+  syncSearchChrome();
   if (debounceT) window.clearTimeout(debounceT);
   debounceT = window.setTimeout(() => {
     filter = searchEl.value;
@@ -3580,14 +4078,70 @@ searchEl.addEventListener("input", () => {
     renderProjects();
   }, 150);
 });
+function clearSearch() {
+  if (debounceT) { window.clearTimeout(debounceT); debounceT = null; }
+  searchEl.value = "";
+  syncSearchChrome();
+  if (filter) { filter = ""; visibleLimit = 100; renderProjects(); }
+}
+searchClear.onclick = () => { clearSearch(); searchEl.focus(); };
+// Search drives the list: ↓ moves into results, Enter opens the first match,
+// Esc clears (or, when already empty, hands focus back to the composer).
+searchEl.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    if (searchEl.value) clearSearch();
+    else inputEl.focus();
+    return;
+  }
+  if (e.key !== "ArrowDown" && e.key !== "Enter") return;
+  // Flush a pending debounce so the list reflects exactly what was typed.
+  if (debounceT) { window.clearTimeout(debounceT); debounceT = null; filter = searchEl.value; visibleLimit = 100; renderProjects(); }
+  const first = chatListEl.querySelector<HTMLButtonElement>(".chat-item:not(:disabled)");
+  if (!first) return;
+  e.preventDefault();
+  if (e.key === "ArrowDown") first.focus();
+  else first.click();
+});
 
 document.addEventListener("keydown", (e) => {
+  const mod = e.metaKey || e.ctrlKey;
+  // An open modal owns the keyboard: no chats created or panels opened behind it.
+  if (mod && modalRoot.innerHTML) return;
+  if (mod && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "b") {
+    e.preventDefault();
+    toggleSidebar();
+    return;
+  }
+  if (mod && (e.key === "/" || e.key === "?")) {
+    e.preventDefault();
+    openShortcuts();
+    return;
+  }
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "m") {
+    e.preventDefault();
+    modelPicker.open();
+    return;
+  }
+  if (mod && e.shiftKey && !e.altKey && e.key.toLowerCase() === "t") {
+    e.preventDefault();
+    thinkingPicker.open();
+    return;
+  }
+  if (mod && !e.shiftKey && e.key.toLowerCase() === "r") {
+    e.preventDefault();
+    if (!booting && !bootError) startInlineRename();
+    return;
+  }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
     e.preventDefault();
     newChat();
   }
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
+    if (document.body.classList.contains("side-hidden")) toggleSidebar();
     searchEl.focus();
     searchEl.select();
   }

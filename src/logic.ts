@@ -161,6 +161,7 @@ export function queueSummary(steering: string[], followUp: string[]): string {
 export type ActivityKind =
   | "idle"
   | "thinking"
+  | "writing"
   | "running"
   | "waiting"
   | "stopping"
@@ -171,6 +172,8 @@ export function activityLabel(kind: ActivityKind, toolName = ""): string {
   switch (kind) {
     case "thinking":
       return "Thinking…";
+    case "writing":
+      return "Writing…";
     case "running":
       return toolName ? `Running ${toolName}…` : "Running command…";
     case "waiting":

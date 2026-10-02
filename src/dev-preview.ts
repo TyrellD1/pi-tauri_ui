@@ -186,14 +186,14 @@ export function installPreview() {
       emit({type:'extension_ui_request',method:'notify',message:'Background notice'});emit({type:'extension_ui_request',method:'setStatus',statusText:'Working'});
       emit({type:'extension_ui_request',method:'confirm',id:'b',title:'Permission B',message:'Allow next command?'});
       check('notifications preserve permission and queue',card===$('dialog-slot').firstElementChild && $('dialog-slot').children.length===2);
-      failResponse=true;Array.from(card.querySelectorAll('button')).find(b=>b.textContent==='No')!.click();await sleep();
+      failResponse=true;Array.from(card.querySelectorAll('button')).find(b=>b.getAttribute('aria-label')==='No')!.click();await sleep();
       const responseCount=calls.filter(c=>c.cmd==='pi_ui_response').length;
       card.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
       check('permission in-flight guard',calls.filter(c=>c.cmd==='pi_ui_response').length===responseCount);
       holdResponse?.();await sleep();
       const retry=Array.from(card.querySelectorAll('button')).find(b=>b.textContent==='Retry response');check('permission failure explicitly retryable',!!retry);retry!.click();await sleep();
       check('response A cannot clear B',$('dialog-slot').textContent!.includes('Permission B') && !$('dialog-slot').firstElementChild?.classList.contains('hidden'));
-      Array.from($('dialog-slot').querySelectorAll('button')).find(b=>b.textContent==='No')!.click();await sleep();
+      Array.from($('dialog-slot').querySelectorAll('button')).find(b=>b.getAttribute('aria-label')==='No')!.click();await sleep();
       await loadScenario('Empty');
       type('IME composition'); const beforeIme=calls.length;
       input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',isComposing:true,bubbles:true}));
@@ -248,8 +248,8 @@ export function installPreview() {
       check('new chat has its own draft',input.value==='');
       // Navigation through real Settings needs no respawn: one scoped state
       // load moves folders, and no process is ever spawned to switch.
-      const routed=calls.length;$('btn-settings').click();$<HTMLInputElement>('m-cwd').value='/projects/other';
-      Array.from($('modal-root').querySelectorAll('button')).find(b=>b.textContent==='Save')!.click();await sleep(100);
+      const routed=calls.length;$('btn-settings').click();$<HTMLInputElement>('m-cwd').value='/projects/other';$('m-cwd').dispatchEvent(new Event('input',{bubbles:true}));
+      Array.from($('modal-root').querySelectorAll('button')).find(b=>b.textContent==='Open folder')!.click();await sleep(100);
       check('folder change needs no respawn',cwd==='/projects/other' && !calls.slice(routed).some(c=>['pi_spawn','pi_set_cwd','pi_new_session','pi_switch_session'].includes(c.cmd)));
       // The cap is per project listing: the active project renders a 100-chat
       // window, so the DOM stays bounded no matter how many sessions exist.
@@ -262,6 +262,20 @@ export function installPreview() {
       check('disconnect disables send and retains draft',$<HTMLButtonElement>('btn-send').disabled && input.value==='draft through disconnect');
       Array.from($('messages-inner').querySelectorAll('button')).find(b=>b.textContent==='Retry connection')!.click();await sleep(120);
       check('reconnect resumes same chat and draft',path===reconnectPath && input.value==='draft through disconnect' && !$<HTMLButtonElement>('btn-send').disabled);
+      // Model picker: controlled popover — search narrows grouped options,
+      // Enter picks, the trigger reflects the owner's state.
+      $('model-picker').click();await sleep(30);
+      const pkInput=document.querySelector<HTMLInputElement>('.picker-pop input')!;
+      check('model picker opens with grouped options',!!pkInput && document.querySelectorAll('.picker-pop .pk-group').length===2 && document.activeElement===pkInput);
+      pkInput.value='sonnet';pkInput.dispatchEvent(new Event('input',{bubbles:true}));
+      check('model search filters',document.querySelectorAll('.picker-pop .pk-item').length===1);
+      pkInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(60);
+      check('model pick calls set_model and closes',!document.querySelector('.picker-pop') && [...calls].reverse().find(c=>c.cmd==='pi_set_model')?.args?.modelId==='claude-sonnet-4' && $('model-picker').textContent!.includes('claude-sonnet-4'));
+      $('thinking-picker').click();await sleep(30);
+      const tkInput=document.querySelector<HTMLInputElement>('.picker-pop input')!;
+      tkInput.value='max';tkInput.dispatchEvent(new Event('input',{bubbles:true}));
+      tkInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(60);
+      check('thinking pick calls set_thinking',[...calls].reverse().find(c=>c.cmd==='pi_set_thinking')?.args?.level==='max');
       typeSearch('');await sleep(200);await loadScenario('Populated');
       check('tables render without literal syntax',!!$('messages-inner').querySelector('table'));
       result.textContent=report.join('\n')+`\n\n${report.length} checks passed.`;
