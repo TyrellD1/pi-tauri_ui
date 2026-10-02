@@ -23,13 +23,15 @@ use std::{
     io::BufRead,
 };
 
+mod agents;
+
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
-    sync::{oneshot, Mutex},
+    sync::{mpsc, oneshot, Mutex},
 };
 
 /// Cap + idle reaping keep the pool near terminal-pi costs: a handful of
@@ -59,6 +61,10 @@ struct Pool {
     /// Scope of the visible chat. Its process is exempt from reaping — the
     /// tab you are looking at stays connected (CodeG's active-tab rule).
     visible: Mutex<(String, Option<String>)>,
+    /// Session file → connected `pi-agent` runner (see agents.rs). Abort and
+    /// dialog answers for an agent's chat go to its runner, never to a pool
+    /// process (the CLI owns that session while it runs).
+    agent_links: Mutex<HashMap<String, mpsc::UnboundedSender<String>>>,
 }
 
 impl Pool {
@@ -71,6 +77,7 @@ impl Pool {
             default_thinking: Mutex::new(None),
             pi_bin: Mutex::new(None),
             visible: Mutex::new((String::new(), None)),
+            agent_links: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -587,6 +594,10 @@ async fn pi_abort(cwd: String, session: Option<String>, pool: State<'_, Arc<Pool
     // Stop only. Queued steering/follow-up messages are preserved (abort
     // continues them when they remain); the UI offers an explicit Clear.
     // Lookup only: a missing process means nothing is running.
+    if let Some(link) = agents::link_for(&pool, session.as_deref()).await {
+        let _ = link.send(serde_json::json!({ "type": "abort" }).to_string());
+        return Ok(serde_json::json!({ "ok": true, "agent": true }));
+    }
     let inst = find(&pool, &cwd, session.as_deref()).await.ok_or("chat process is gone; reopen the chat")?;
     let r = inst_request(&pool, &inst, serde_json::json!({ "type": "abort" })).await?;
     Ok(r)
@@ -782,6 +793,12 @@ async fn pi_coded_chat(cwd: String, name: String, first_message: Option<String>,
 
 #[tauri::command]
 async fn pi_ui_response(cwd: String, session: Option<String>, id: String, payload: Value, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
+    // A CLI agent's dialog: the answer goes back to its runner.
+    if let Some(link) = agents::link_for(&pool, session.as_deref()).await {
+        link.send(serde_json::json!({ "type": "ui_response", "id": id, "payload": payload }).to_string())
+            .map_err(|_| "the agent disconnected; it auto-answered the request".to_string())?;
+        return Ok(serde_json::json!({ "ok": true }));
+    }
     let mut cmd = serde_json::json!({ "type": "extension_ui_response", "id": id });
     if let Value::Object(map) = payload {
         if let Value::Object(cmd_map) = &mut cmd {
@@ -1112,9 +1129,14 @@ mod tests {
 
 fn main() {
     let pool = Arc::new(Pool::new());
+    let bridge_pool = pool.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            agents::start_bridge(app.handle().clone(), bridge_pool);
+            Ok(())
+        })
         .manage(pool)
         .invoke_handler(tauri::generate_handler![
             pi_prompt,
@@ -1140,7 +1162,12 @@ fn main() {
             pi_list_sessions,
             pi_all_projects,
             pi_list_dirs,
-            pi_read_image
+            pi_read_image,
+            agents::pi_agents_list,
+            agents::pi_agent_models,
+            agents::pi_agent_cancel,
+            agents::pi_agents_clear,
+            agents::pi_read_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

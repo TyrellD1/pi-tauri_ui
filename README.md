@@ -41,6 +41,25 @@ Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` proc
 
 Chats made by code carry a `[code]` name prefix (plus a local `code` badge that survives restarts) and can be filed into groups on creation: right-click empty sidebar → New coded chat, or call the `pi_coded_chat` Tauri command (`{ cwd, name, first_message? }`) from a future extension.
 
+## Agents from the CLI (`pi-agent`)
+
+Any caller (a terminal, a script, Claude Code) can hand work to a pi agent:
+
+```bash
+npm link --ignore-scripts          # once, from this repo (plain `npm link` would run the app installer)
+pi-agent run --cwd ~/code/app "Find unused exports in src/ and list them"   # answer on stdout
+```
+
+- **Visible in the app.** Each agent is a real pi session. It shows up under its project (badged **agent**) and in
+  the sidebar's **Agents** section, which shows queued position, running, done and failed.
+- **Live while it runs.** With the app open you can watch it stream, answer its permission prompts, and stop it.
+  The chat is read-only while the agent runs.
+- **Queue.** At most 12 agents run at once (`pi-agent config set max-concurrent N`); the rest queue.
+- **Recommended models.** A shared list with when-to-use and when-not-to-use notes. The default is
+  `opencode-go/muse-spark-1.3-contributor`; edit it with `pi-agent models set|default|remove`.
+
+Full reference: [docs/pi-agent.md](./docs/pi-agent.md). Design: [docs/pi-agent-cli-plan.md](./docs/pi-agent-cli-plan.md).
+
 ## Shortcuts & send contract
 
 - `Enter` send (idle) / steer (running with a draft) · running + empty draft + `Enter` = no action
@@ -57,7 +76,7 @@ The header holds a sidebar toggle, a `project › chat` breadcrumb (click the pr
 
 ```bash
 npm run build
-npm test
+npm test            # logic + controller + pi-agent CLI end-to-end (fake pi, no model calls)
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build
 ```

@@ -172,6 +172,24 @@ Node 18+ (pi already needs Node). No dependencies. Installed with `npm link` fro
 - Dev-preview UI regression: `agent_update` events fill the Agents section. Opening a running agent's chat locks the
   composer and shows the banner, Stop calls `pi_agent_cancel`, and the settle unlocks it.
 
+## As built
+
+Everything above shipped. Changes made while building:
+
+- **Queue race fixed (found by the tests).** Reading slots before tickets let two waiters take the last slot: the
+  checks saw 3 running at a cap of 2. Tickets are now read first, which the slot-before-ticket-removal write order
+  makes safe. Pid files are written with an atomic rename, so a concurrent sweep never reads an empty pid and
+  deletes a live entry. A 10-agent burst at a cap of 3 now guards this.
+- **A running agent's chat never starts an app-side pi process.** Loading a session could append entries to it, so
+  the read-only view reads messages straight from the session file. It uses `pi_read_session`, allowlisted to
+  session files that an agent record names. No command reaches a pool process for that chat until the agent ends.
+  Then the chat reloads as an ordinary chat.
+- **`npm link` caveat.** The package's own `install` lifecycle script rebuilds and reinstalls the app, so the docs
+  say `npm link --ignore-scripts` (or a symlink).
+- **Rust status.** Crate downloads (`static.crates.io`) were blocked by this environment's network policy, so the
+  Rust changes are parse-checked (`rustfmt`) but **not compiled or `cargo test`ed here**. Logic sits in pure,
+  unit-tested functions; run `cargo test` / `npm run tauri build` locally before merging.
+
 ## Out of scope (follow-ups)
 
 - **Steering a running agent from the app.** It's read-only for now. The socket could carry `steer` later.
