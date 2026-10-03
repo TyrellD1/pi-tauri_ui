@@ -21,7 +21,16 @@ interface PiEvent { type: string; [k: string]: unknown }
 interface Draft { text: string; images: PendingImage[] }
 interface FailedSend extends Draft { id: string; error: string; owner: string; kind: "prompt" | "steer" | "follow_up" }
 interface PendingSend extends Draft { id: string; owner: string; index: number }
-interface UiDialog { id: string; card: HTMLElement; inFlight: boolean }
+interface UiDialog { id: string; card: HTMLElement; inFlight: boolean; scope: { cwd: string; session: string | null } | null }
+// CLI agents (`pi-agent`, see docs/pi-agent-cli-plan.md): records from the
+// registry, merged live from `agent_update` events over the socket bridge.
+interface AgentRecord {
+  id: string; name: string; task?: string; cwd: string; model?: string; caller?: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | "lost";
+  sessionFile?: string | null; queuePosition?: number | null; error?: string | null;
+  createdAt?: number; startedAt?: number | null; endedAt?: number | null;
+}
+interface AgentModels { default: string; models: { id: string; use: string; avoid: string }[]; maxConcurrent: number }
 // ---------- dom ----------
 const $ = <T extends HTMLElement = HTMLElement>(id: string) =>
   document.getElementById(id) as T;
@@ -448,6 +457,7 @@ function updateDocTitle() {
 }
 crumbProject.onclick = () => openProjectPickerModal(cwd, "Start chat here", (dir) => { void pickProjectDir(dir); });
 function startInlineRename() {
+  if (agentGuard()) return;
   if (titleEditing) { chatTitle.querySelector("input")?.focus(); return; }
   titleEditing = true;
   chatTitle.classList.add("editing");
@@ -630,6 +640,40 @@ function openSettings() {
     hint.textContent = "Switches to that folder's chats. Running chats keep running. Drafts stay with their original chat.";
     box.appendChild(hint);
 
+    // Agents (pi-agent CLI): recommended models + concurrency. Edited from the
+    // CLI so every caller shares one source of truth; shown here read-only.
+    section("Agents");
+    const agentBox = document.createElement("div");
+    agentBox.className = "agent-models";
+    const fillAgents = (m: AgentModels | null) => {
+      agentBox.replaceChildren();
+      if (!m) {
+        const p = document.createElement("p"); p.className = "muted";
+        p.textContent = "Agent settings unavailable.";
+        agentBox.appendChild(p);
+        return;
+      }
+      for (const x of m.models) {
+        const row = document.createElement("div"); row.className = "am-row";
+        const head = document.createElement("div"); head.className = "am-head";
+        const id = document.createElement("code"); id.textContent = x.id;
+        head.appendChild(id);
+        if (x.id === m.default) { const d = document.createElement("span"); d.className = "agent-chip"; d.textContent = "default"; head.appendChild(d); }
+        const use = document.createElement("div"); use.className = "am-line"; use.innerHTML = "<span>Use</span>"; use.append(x.use);
+        const avoid = document.createElement("div"); avoid.className = "am-line"; avoid.innerHTML = "<span>Avoid</span>"; avoid.append(x.avoid);
+        row.append(head, use, avoid);
+        agentBox.appendChild(row);
+      }
+      const note = document.createElement("p"); note.className = "muted am-note";
+      note.innerHTML = `Up to <strong></strong> agents run at once; more wait in a queue. Change these with <code>pi-agent models set &lt;provider/id&gt; --use "…" --avoid "…" [--default]</code> and <code>pi-agent config set max-concurrent N</code>.`;
+      (note.querySelector("strong") as HTMLElement).textContent = String(m.maxConcurrent);
+      agentBox.appendChild(note);
+    };
+    fillAgents(agentModels);
+    box.appendChild(agentBox);
+    void refreshAgentModels().then(() => { if (agentBox.isConnected) fillAgents(agentModels); });
+
+
     const row = document.createElement("div");
     row.className = "dialog-actions";
     const keys = document.createElement("button");
@@ -658,7 +702,7 @@ function openSettings() {
     inp.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.isComposing && !s.disabled) s.click();
     });
-  }, { focusBox: true });
+  }, { focusBox: true, wide: true });
 }
 
 function openShortcuts() {
@@ -785,6 +829,7 @@ function openRename(target?: { cwd: string; session: string | null; current: str
 }
 
 async function openSessionDetails() {
+  if (agentGuard()) return;
   openModal("Session details", (box) => {
     const p = document.createElement("p");
     p.className = "muted";
@@ -925,6 +970,254 @@ function saveCoded(paths: string[]) {
 function isCoded(name: string | null, path: string): boolean {
   return !!name?.startsWith(CODE_PREFIX) || codedSet().has(path);
 }
+// ---------- CLI agents (pi-agent) ----------
+// The CLI owns each agent's pi process; the app observes. While an agent
+// runs, its chat is read-only here (transcript read straight from the
+// session file, live events over the socket bridge) so there is never a
+// second writer on that session. See docs/pi-agent-cli-plan.md.
+const AGENT_PREFIX = "[agent]";
+function isAgentName(name: string | null | undefined): boolean { return !!name?.startsWith(AGENT_PREFIX); }
+function displayName(name: string | null | undefined): string {
+  return name && isAgentName(name) ? name.slice(AGENT_PREFIX.length).trim() : name ?? "";
+}
+let agents: AgentRecord[] = [];
+// Session files that belong to headless subagents (from the registry). Those
+// chats live only under "Headless subagents" — never in Recent, Groups, or a
+// project's top-level list. The `[agent]` name prefix covers records the
+// registry has already pruned.
+let agentSessionPaths = new Set<string>();
+function setAgents(list: AgentRecord[]) {
+  agents = list;
+  agentSessionPaths = new Set(list.map((a) => a.sessionFile).filter((p): p is string => !!p));
+}
+function isHeadless(s: { name: string | null; path: string }): boolean {
+  return isAgentName(s.name) || agentSessionPaths.has(s.path);
+}
+function headlessPath(path: string | null): boolean {
+  if (!path) return false;
+  if (agentSessionPaths.has(path)) return true;
+  for (const list of projectChats.values()) { const s = list.find((x) => x.path === path); if (s) return isAgentName(s.name); }
+  return false;
+}
+function subagentsOpen(): Set<string> {
+  try {
+    const a = JSON.parse(prefGet("pi-subagents-open") ?? "[]") as unknown;
+    return new Set(Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : []);
+  } catch { return new Set(); }
+}
+function toggleSubagentsOpen(project: string) {
+  const o = subagentsOpen();
+  if (o.has(project)) o.delete(project); else o.add(project);
+  prefSet("pi-subagents-open", JSON.stringify([...o]));
+  renderProjects();
+}
+let agentModels: AgentModels | null = null;
+let agentMax = 12;
+let agentsExpanded = false;
+const AGENT_DONE = new Set(["done", "failed", "cancelled", "lost"]);
+const agentActive = (a: AgentRecord) => !AGENT_DONE.has(a.status);
+function activeAgentFor(path: string): AgentRecord | null {
+  return agents.find((a) => a.status === "running" && !!a.sessionFile && a.sessionFile === path) ?? null;
+}
+function visibleAgent(): AgentRecord | null { return activePath ? activeAgentFor(activePath) : null; }
+function agentGuard(): boolean {
+  if (!visibleAgent()) return false;
+  notify({ text: "This chat is read-only while its agent runs. Stop the agent or wait for it to finish." });
+  return true;
+}
+async function refreshAgents() {
+  try {
+    const r = await invokeChecked<{ agents?: AgentRecord[]; maxConcurrent?: number }>("pi_agents_list");
+    const was = visibleAgent();
+    setAgents(Array.isArray(r.agents) ? r.agents : []);
+    agentMax = Number(r.maxConcurrent) || agentMax;
+    renderProjects();
+    if (was && !visibleAgent()) void reloadVisibleChat();
+    updateSendState();
+  } catch { /* older backend: no agents */ }
+}
+async function refreshAgentModels() {
+  try {
+    const m = await invokeChecked<AgentModels>("pi_agent_models");
+    if (!m || !Array.isArray(m.models)) return;
+    agentModels = m;
+    agentMax = Number(m.maxConcurrent) || agentMax;
+    modelPicker.setState({ items: modelPicker.state.items.map((i) => ({ ...i, hint: recommendedHint(i.value) })) });
+  } catch { /* none */ }
+}
+function recommendedHint(id: string): string | undefined {
+  if (!agentModels) return undefined;
+  if (agentModels.default === id) return "agent default";
+  return agentModels.models.some((m) => m.id === id) ? "recommended" : undefined;
+}
+function onAgentUpdate(rec: AgentRecord | undefined) {
+  if (!rec || typeof rec.id !== "string") return;
+  const was = visibleAgent();
+  const i = agents.findIndex((a) => a.id === rec.id);
+  const prev = i >= 0 ? agents[i] : null;
+  const next = [...agents];
+  if (i >= 0) next[i] = rec; else next.unshift(rec);
+  setAgents(next);
+  // New session rows appear (and finished ones update) in their project.
+  if ((!prev || prev.status !== rec.status) && (rec.status === "running" || AGENT_DONE.has(rec.status))) void refreshAllProjects();
+  renderProjects();
+  if (was && !visibleAgent()) void reloadVisibleChat();
+  updateSendState();
+}
+// The agent finished while its chat was open: it is now an ordinary chat
+// (the backend already retired any stale process), so load it normally.
+async function reloadVisibleChat() {
+  try { await refreshState(); } catch { /* the transcript read below reports */ }
+  await refreshMessages();
+  void refreshStats(); void refreshModels(); void refreshCommands();
+}
+async function openAgentChat(a: AgentRecord) {
+  if (navigating || booting) return;
+  if (dialogs.size) { notify({ text: "Answer the pending request before changing chats or folders." }); return; }
+  if (a.sessionFile === activePath && a.cwd === cwd) return;
+  navigating = true; saveDraft(); const gen = ++bootGen; updateSendState();
+  try {
+    const res = await invokeChecked<{ messages: AgentMessage[] }>("pi_read_session", { path: a.sessionFile });
+    if (gen !== bootGen) return;
+    cwd = a.cwd; activePath = a.sessionFile ?? null; activeName = a.name;
+    cwdLabel.textContent = baseName(cwd); cwdBtn.title = cwd;
+    clearRunScope(true);
+    conversation.reset(res.messages ?? []); messages = conversation.messages;
+    if (unseenFinished.delete(visibleKey())) saveUnseen();
+    restoreDraft();
+    expandedProjects.add(cwd); saveExpanded();
+    setBusy(true);
+    renderTitle(); renderProjects(); renderSettled(); void refreshBranch();
+    stickToBottom = true; scrollBottom(true);
+  } catch (e) {
+    notify({ text: `Couldn't open the agent's chat: ${String(e)}`, kind: "error", retryLabel: "Retry", onRetry: () => openAgentChat(a) });
+  } finally { navigating = false; updateSendState(); }
+}
+async function cancelAgent(a: AgentRecord) {
+  try { await invokeChecked("pi_agent_cancel", { id: a.id }); }
+  catch (e) { notify({ text: `Couldn't stop the agent: ${String(e)}`, kind: "error" }); void refreshAgents(); }
+}
+async function clearFinishedAgents() {
+  try {
+    const r = await invokeChecked<{ removed?: number }>("pi_agents_clear");
+    notify({ text: `Cleared ${r.removed ?? 0} finished agent${r.removed === 1 ? "" : "s"}.` });
+  } catch (e) { notify({ text: `Couldn't clear agents: ${String(e)}`, kind: "error" }); }
+  await refreshAgents();
+}
+const agentBanner = $("agent-banner");
+function renderAgentBanner(a: AgentRecord | null) {
+  if (!a) {
+    if (!agentBanner.classList.contains("hidden")) { agentBanner.classList.add("hidden"); agentBanner.replaceChildren(); agentBanner.dataset.sig = ""; }
+    return;
+  }
+  const sig = `${a.id}:${a.status}:${stopping}`;
+  if (agentBanner.dataset.sig === sig) return;
+  agentBanner.dataset.sig = sig;
+  agentBanner.classList.remove("hidden");
+  const dot = document.createElement("span"); dot.className = "run-spin"; dot.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span"); text.className = "ab-text";
+  const strong = document.createElement("strong"); strong.textContent = "Running as a CLI agent";
+  const meta = document.createElement("span"); meta.className = "ab-meta";
+  const bits = [a.caller && a.caller !== "cli" ? `started by ${a.caller}` : "started from the CLI", a.startedAt ? fmtRelative(a.startedAt) : "", a.model?.split("/").pop() ?? ""].filter(Boolean);
+  meta.textContent = ` · ${bits.join(" · ")} — read-only until it finishes`;
+  text.append(strong, meta);
+  const stop = document.createElement("button"); stop.type = "button";
+  stop.textContent = stopping ? "Stopping…" : "Stop agent"; stop.disabled = stopping;
+  stop.onclick = () => void doAbort();
+  agentBanner.replaceChildren(dot, text, stop);
+}
+function agentStatusChip(a: AgentRecord): HTMLElement | null {
+  if (a.status === "running") {
+    const sp = document.createElement("span"); sp.className = "run-spin"; sp.setAttribute("role", "img"); sp.setAttribute("aria-label", "running"); return sp;
+  }
+  const label = a.status === "queued" ? (a.queuePosition ? `#${a.queuePosition}` : "queued")
+    : a.status === "failed" ? "failed" : a.status === "lost" ? "lost" : a.status === "cancelled" ? "stopped" : "";
+  if (!label) return null;
+  const c = document.createElement("span");
+  c.className = "agent-chip" + (a.status === "failed" || a.status === "lost" ? " bad" : "");
+  c.textContent = label;
+  if (a.status === "queued") c.title = "Waiting for a free agent slot";
+  if (a.error) c.title = a.error;
+  return c;
+}
+function agentRow(a: AgentRecord): HTMLButtonElement {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = "agent-item";
+  el.dataset.agentId = a.id;
+  if (a.sessionFile && a.sessionFile === activePath) el.setAttribute("aria-current", "true");
+  const row = document.createElement("div"); row.className = "ci-row";
+  const t = document.createElement("div"); t.className = "ci-title"; t.textContent = a.name || "agent";
+  row.appendChild(t);
+  const chip = agentStatusChip(a); if (chip) row.appendChild(chip);
+  const time = document.createElement("div"); time.className = "ci-time";
+  const at = a.endedAt || a.startedAt || a.createdAt; time.textContent = at ? fmtRelative(at) : "";
+  row.appendChild(time);
+  const sub = document.createElement("div"); sub.className = "ci-sub";
+  sub.textContent = (a.status === "failed" || a.status === "lost") && a.error ? a.error : [baseName(a.cwd), a.model?.split("/").pop()].filter(Boolean).join(" · ");
+  el.append(row, sub);
+  el.title = a.task ? `${a.task.slice(0, 300)}${a.task.length > 300 ? "…" : ""}` : a.name;
+  el.setAttribute("aria-label", `${a.name}, agent ${a.status}${a.queuePosition ? ` number ${a.queuePosition}` : ""}`);
+  el.disabled = navigating || booting;
+  el.onclick = () => {
+    if (a.sessionFile) void openSession(a.cwd, a.sessionFile);
+    else notify({ text: a.status === "queued" ? `${a.name} is waiting for a free slot (${agentMax} run at once).` : `${a.name} has no chat to open.` });
+  };
+  return el;
+}
+function renderAgentsParent(q: string, isOpen: boolean) {
+  if (!agents.length) return;
+  const list = q ? agents.filter((a) => `${a.name} ${a.task ?? ""}`.toLowerCase().includes(q)) : agents;
+  if (q && !list.length) return;
+  const running = agents.filter((a) => a.status === "running").length;
+  const queued = agents.filter((a) => a.status === "queued").length;
+  const count = document.createElement("span");
+  count.className = "agents-count";
+  count.textContent = running || queued ? `${running}/${agentMax}${queued ? ` +${queued}` : ""}` : "";
+  count.title = `${running} running, ${queued} queued, up to ${agentMax} at once`;
+  const section = document.createElement("div");
+  section.className = "parent-section agents-section";
+  section.setAttribute("role", "group");
+  section.setAttribute("aria-label", "Headless subagents");
+  section.appendChild(parentHead("Headless subagents", "agents", isOpen, count));
+  chatListEl.appendChild(section);
+  if (!isOpen) return;
+  const body = document.createElement("div");
+  body.className = "parent-body";
+  section.appendChild(body);
+  // Active agents always show; finished ones fill the rest.
+  const limit = agentsExpanded ? 30 : 6;
+  const active = list.filter(agentActive);
+  const shown = [...active, ...list.filter((a) => !agentActive(a)).slice(0, Math.max(0, limit - active.length))];
+  for (const a of shown) body.appendChild(agentRow(a));
+  const hasFinished = agents.some((a) => !agentActive(a));
+  const foot = document.createElement("div");
+  foot.className = "agents-foot";
+  if (list.length > shown.length || agentsExpanded) {
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "show-more";
+    more.textContent = agentsExpanded ? "Show less" : `Show ${Math.min(list.length, 30) - shown.length} more`;
+    more.onclick = () => { agentsExpanded = !agentsExpanded; renderProjects(); };
+    foot.appendChild(more);
+  }
+  if (hasFinished && !q) {
+    const clr = document.createElement("button");
+    clr.type = "button"; clr.className = "show-more";
+    clr.textContent = "Clear finished";
+    clr.onclick = () => void clearFinishedAgents();
+    foot.appendChild(clr);
+  }
+  if (foot.childElementCount) body.appendChild(foot);
+}
+function openAgentMenu(x: number, y: number, a: AgentRecord) {
+  const items: (MenuItem | "sep")[] = [];
+  if (a.sessionFile) items.push({ label: "Open chat", onPick: () => void openSession(a.cwd, a.sessionFile!) });
+  if (agentActive(a)) items.push({ label: "Stop agent", onPick: () => void cancelAgent(a) });
+  items.push({ label: "Copy agent ID", onPick: () => { void navigator.clipboard.writeText(a.id).then(() => notify({ text: `Copied ${a.id}` }), () => notify({ text: a.id })); } });
+  if (agents.some((x) => !agentActive(x))) items.push("sep", { label: "Clear finished agents", onPick: () => void clearFinishedAgents() });
+  openMenu(items, { left: x, top: y }, "Agent actions");
+}
+
 function groupClosed(): Set<string> {
   try {
     const a = JSON.parse(prefGet("pi-groups-closed") ?? "[]") as unknown;
@@ -932,12 +1225,12 @@ function groupClosed(): Set<string> {
   } catch { return new Set(); }
 }
 function saveGroupClosed(s: Set<string>) { prefSet("pi-groups-closed", JSON.stringify([...s])); }
-type ParentState = { groups: boolean; projects: boolean; recent: boolean };
+type ParentState = { groups: boolean; projects: boolean; recent: boolean; agents: boolean };
 function parentsOpen(): ParentState {
   try {
     const o = JSON.parse(prefGet("pi-parents") ?? "{}") as Partial<ParentState>;
-    return { groups: o.groups !== false, projects: o.projects !== false, recent: o.recent === true };
-  } catch { return { groups: true, projects: true, recent: false }; }
+    return { groups: o.groups !== false, projects: o.projects !== false, recent: o.recent === true, agents: o.agents !== false };
+  } catch { return { groups: true, projects: true, recent: false, agents: true }; }
 }
 function saveParents(p: ParentState) { prefSet("pi-parents", JSON.stringify(p)); }
 function findProjectForPath(path: string): string | null {
@@ -959,7 +1252,7 @@ function groupChats(name: string, groups: ChatGroups, q: string): { info: Sessio
     const c = findProjectForPath(path);
     if (!c) continue;
     const info = (projectChats.get(c) ?? []).find((s) => s.path === path);
-    if (!info || !chatMatches(info, q)) continue;
+    if (!info || isHeadless(info) || !chatMatches(info, q)) continue;
     out.push({ info, project: c });
   }
   return out;
@@ -986,6 +1279,7 @@ function baseName(p: string): string {
 }
 
 async function refreshAllProjects() {
+  void refreshAgents();
   const gen = bootGen;
   try {
     const res = await invokeChecked<{
@@ -1278,23 +1572,24 @@ function chatButton(s: SessionInfo, project: string): HTMLButtonElement {
   row.className = "ci-row";
   const t = document.createElement("div");
   t.className = "ci-title";
-  t.textContent = s.name || s.preview.slice(0, 42) || "Untitled";
+  t.textContent = displayName(s.name) || s.preview.slice(0, 42) || "Untitled";
   const time = document.createElement("div");
   time.className = "ci-time";
   time.textContent = fmtRelative(s.mtime);
   row.appendChild(t);
   el.dataset.path = s.path;
   el.dataset.project = project;
+  if (isHeadless(s)) el.dataset.headless = "1";
   const rkey = `${project}:${s.path}`;
   const rlabel = s.name || s.preview.slice(0, 60) || "Untitled";
-  if (isCoded(s.name, s.path)) {
+  if (!isHeadless(s) && isCoded(s.name, s.path)) {
     const badge = document.createElement("span");
     badge.className = "code-badge";
     badge.textContent = "code";
     badge.title = "Made by code";
     row.appendChild(badge);
   }
-  if (runningSet.has(rkey)) {
+  if (runningSet.has(rkey) || !!activeAgentFor(s.path)) {
     const spin = document.createElement("span");
     spin.className = "run-spin";
     spin.title = "Running";
@@ -1327,6 +1622,7 @@ function renderProjects() {
   renderRecentParent(q, parents.recent);
   renderGroupsParent(q, parents.groups);
   renderProjectsParent(q, parents.projects);
+  renderAgentsParent(q, parents.agents);
 }
 function parentHead(title: string, key: keyof ParentState, isOpen: boolean, extra: HTMLElement | null): HTMLElement {
   const row = document.createElement("div");
@@ -1371,6 +1667,7 @@ function recentChats(q: string): { info: SessionInfo; project: string }[] {
   const push = (project: string, info: SessionInfo) => {
     if (seen.has(info.path)) return;
     seen.add(info.path);
+    if (isHeadless(info)) return;
     if (!chatMatches(info, q)) return;
     all.push({ info, project });
   };
@@ -1555,6 +1852,47 @@ async function newChatInGroup(group: string) {
   renderProjects();
   renderSettled();
 }
+// A project's "Headless subagents" sub-folder: collapsed by default (open
+// state remembered per project), opened automatically while searching.
+function subagentFolder(project: string, list: SessionInfo[], q: string): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "subfolder";
+  const open = !!q || subagentsOpen().has(project);
+  const head = document.createElement("button");
+  head.type = "button";
+  head.className = "project-head subfolder-head" + (open ? " open" : "");
+  head.setAttribute("aria-expanded", String(open));
+  head.title = `Chats run by pi-agent in ${baseName(project)}`;
+  const chev = document.createElement("span");
+  chev.innerHTML = chevSvg();
+  const name = document.createElement("span");
+  name.className = "p-name";
+  name.textContent = "Headless subagents";
+  const running = list.filter((s) => runningSet.has(`${project}:${s.path}`) || !!activeAgentFor(s.path)).length;
+  const count = document.createElement("span");
+  count.className = "p-count";
+  count.textContent = String(list.length);
+  if (running) {
+    const sp = document.createElement("span"); sp.className = "run-spin"; sp.setAttribute("role", "img"); sp.setAttribute("aria-label", `${running} running`);
+    head.append(chev, name, sp, count);
+  }
+  if (!running) head.append(chev, name, count);
+  head.onclick = () => toggleSubagentsOpen(project);
+  wrap.appendChild(head);
+  if (open) {
+    const box = document.createElement("div");
+    box.className = "project-chats";
+    for (const s of list.slice(0, 50)) box.appendChild(chatButton(s, project));
+    if (list.length > 50) {
+      const more = document.createElement("div");
+      more.className = "project-empty";
+      more.textContent = `${list.length - 50} more — search to find older ones.`;
+      box.appendChild(more);
+    }
+    wrap.appendChild(box);
+  }
+  return wrap;
+}
 function renderProjectsParent(q: string, isOpen: boolean) {
   const projects = getProjects();
   const section = document.createElement("div");
@@ -1578,7 +1916,8 @@ function renderProjectsParent(q: string, isOpen: boolean) {
   }
   for (const p of projects) {
     const all = projectChats.get(p) ?? (p === cwd ? sessions : []);
-    const list = all.filter((s) => chatMatches(s, q));
+    const list = all.filter((s) => !isHeadless(s) && chatMatches(s, q));
+    const subList = all.filter((s) => isHeadless(s) && chatMatches(s, q));
     const section = document.createElement("div");
     section.className = "project-section";
     section.setAttribute("role", "group");
@@ -1633,10 +1972,12 @@ function renderProjectsParent(q: string, isOpen: boolean) {
       const box = document.createElement("div");
       box.className = "project-chats";
       if (list.length === 0) {
-        const e = document.createElement("div");
-        e.className = "project-empty";
-        e.textContent = q ? "No matches in this project." : "No chats yet.";
-        box.appendChild(e);
+        if (!subList.length) {
+          const e = document.createElement("div");
+          e.className = "project-empty";
+          e.textContent = q ? "No matches in this project." : "No chats yet.";
+          box.appendChild(e);
+        }
       } else if (p === cwd) {
         // Bounded visible window over the full session list: search filters across
         // every session the backend returned (paths are real), paging keeps the DOM
@@ -1665,6 +2006,9 @@ function renderProjectsParent(q: string, isOpen: boolean) {
           box.appendChild(more);
         }
       }
+      // Folder before files: the sub-folder leads, so it never hides below
+      // a long (paged) chat list.
+      if (subList.length) box.prepend(subagentFolder(p, subList, q));
       section.appendChild(box);
     }
     projSection.appendChild(section);
@@ -1736,7 +2080,7 @@ function renderProjectsParent(q: string, isOpen: boolean) {
 
 chatListEl.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-  const items = Array.from(chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item"));
+  const items = Array.from(chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item, .agent-item"));
   if (items.length === 0) return;
   e.preventDefault();
   const i = items.indexOf(document.activeElement as HTMLButtonElement);
@@ -1845,13 +2189,16 @@ function openChatMenu(x: number, y: number, target: CtxTarget) {
     openRename({ cwd: pcwd, session: target.path, current: rowName(pcwd, target.path) });
   });
   if (target.inGroup) addItem(`Remove from ${target.inGroup}`, () => removeFromGroup(target.inGroup!, target.path));
+  // Headless subagent chats stay in their own section: no groups.
+  const groupable = !headlessPath(target.path);
   const trigger = addItem("Add to group ›", () => {
     if (sub) hideSub();
     else { const btns = showSub(trigger); btns[0]?.focus(); }
   }, false, true);
+  if (!groupable) { trigger.remove(); buttons.splice(buttons.indexOf(trigger), 1); }
   trigger.setAttribute("aria-haspopup", "menu");
   trigger.setAttribute("aria-expanded", "false");
-  trigger.addEventListener("mouseenter", () => { clearSubTimer(); if (!sub) showSub(trigger); });
+  trigger.addEventListener("mouseenter", () => { clearSubTimer(); if (groupable && !sub) showSub(trigger); });
   trigger.addEventListener("mouseleave", () => {
     clearSubTimer();
     ctxSubTimer = window.setTimeout(hideSub, 150);
@@ -1978,6 +2325,12 @@ function openNewCodedChat() {
   });
 }
 chatListEl.addEventListener("contextmenu", (e) => {
+  const agentEl = (e.target as HTMLElement).closest(".agent-item") as HTMLElement | null;
+  if (agentEl) {
+    const a = agents.find((x) => x.id === agentEl.dataset.agentId);
+    if (a) { e.preventDefault(); openAgentMenu(e.clientX, e.clientY, a); }
+    return;
+  }
   const item = (e.target as HTMLElement).closest(".chat-item") as HTMLElement | null;
   if (!item || !item.dataset.path) {
     // Empty sidebar background: offer creation instead of nothing.
@@ -2409,7 +2762,7 @@ function chatContextBar(): HTMLElement {
   const groups = loadGroups();
   const ap = activePath;
   const memberOf = ap ? Object.keys(groups).filter((n) => groups[n].includes(ap)) : [];
-  const shown: (string | null)[] = memberOf.length > 0 ? memberOf : [null];
+  const shown: (string | null)[] = headlessPath(ap) ? [] : memberOf.length > 0 ? memberOf : [null];
   for (const n of shown) {
     const gb = document.createElement("button");
     gb.type = "button";
@@ -2434,6 +2787,7 @@ async function pickProjectDir(dir: string) {
   await newChatInProject(dir);
 }
 function openGroupPicker(anchor: HTMLElement) {
+  if (headlessPath(activePath)) { notify({ text: "Headless subagent chats stay in their own section and can't join groups." }); return; }
   if (!activePath) { notify({ text: "Start or open a chat first — groups need a session to hold." }); return; }
   const path = activePath;
   const groups = loadGroups();
@@ -2644,6 +2998,9 @@ function visibleScope(): { cwd: string; session: string | null } {
   return { cwd, session: activePath };
 }
 async function invokeScoped<T>(cmd: string, params: Record<string, unknown> = {}): Promise<T> {
+  // A running CLI agent owns its session file: never route a command (which
+  // would spawn a second pi process on that file) while it runs.
+  if (!targetScope && visibleAgent()) throw new Error("read-only while the agent runs");
   return invokeChecked<T>(cmd, { ...params, ...visibleScope() });
 }
 
@@ -2717,14 +3074,16 @@ function updateSendState() {
   queueBtn.disabled = !ok || !conn || sendInFlight !== null;
   stopBtn.disabled = stopping || !conn;
   modelPicker.setState({ disabled: !conn || streaming }); thinkingPicker.setState({ disabled: !conn || streaming });
-  inputEl.disabled = navigating;
+  const agent = visibleAgent();
+  inputEl.disabled = navigating || !!agent;
   $("btn-new").toggleAttribute("disabled", !conn);
-  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item").forEach(b => b.disabled = !conn);
-  sendBtn.disabled = !ok || !conn || sendInFlight !== null;
-  attachBtn.disabled = !conn;
-  const hint = streaming ? "↵ steer · ◷ queue · Esc stop" : "↵ send · ⇧↵ newline · / skills";
+  chatListEl.querySelectorAll<HTMLButtonElement>(".chat-item, .agent-item").forEach(b => b.disabled = !conn);
+  sendBtn.disabled = !ok || !conn || sendInFlight !== null || !!agent;
+  attachBtn.disabled = !conn || !!agent;
+  renderAgentBanner(agent);
+  const hint = agent ? "Esc stop agent" : streaming ? "↵ steer · ◷ queue · Esc stop" : "↵ send · ⇧↵ newline · / skills";
   if (composerHint.textContent !== hint) composerHint.textContent = hint;
-  const ph = navigating ? "Opening chat…" : streaming ? "Steer pi while it works… (◷ queues for after)" : "Message pi…";
+  const ph = navigating ? "Opening chat…" : agent ? "Read-only while the agent runs" : streaming ? "Steer pi while it works… (◷ queues for after)" : "Message pi…";
   if (inputEl.placeholder !== ph) inputEl.placeholder = ph;
   if (!streaming) {
     sendBtn.setAttribute("aria-label", "Send message");
@@ -2736,7 +3095,7 @@ function updateSendState() {
     sendBtn.setAttribute("aria-label", steerable ? "Send steering message" : "Type a message to steer");
     sendBtn.title = steerable ? "Send steering message (Enter)" : "Type to steer";
     stopBtn.classList.remove("hidden");
-    queueBtn.classList.remove("hidden");
+    queueBtn.classList.toggle("hidden", !!agent);
   }
   messagesInner.querySelectorAll<HTMLButtonElement>(".retry-btn").forEach(b => b.disabled = streaming || stopping || !conn || sendInFlight !== null);
   renderStatus();
@@ -2793,7 +3152,7 @@ function applyState(st: Record<string, unknown>) {
   renderBranch();
   const level = typeof st.thinkingLevel === "string" ? st.thinkingLevel : null;
   if (level && THINKING_LEVELS.some(o => o.value === level)) thinkingPicker.setState({ value: level });
-  setBusy(st.isStreaming === true); renderProjects();
+  setBusy(st.isStreaming === true || !!visibleAgent()); renderProjects();
 }
 async function refreshState() {
   const gen = bootGen;
@@ -2839,7 +3198,10 @@ function reconcileSend() {
 async function refreshMessages() {
   const gen = bootGen, rev = revision;
   try {
-    const res = await invokeScoped<{messages: AgentMessage[]}>("pi_get_messages");
+    const agent = visibleAgent();
+    const res = agent
+      ? await invokeChecked<{messages: AgentMessage[]}>("pi_read_session", { path: agent.sessionFile })
+      : await invokeScoped<{messages: AgentMessage[]}>("pi_get_messages");
     if (gen !== bootGen || rev !== revision) return;
     conversation.reset(res.messages ?? []); messages = conversation.messages;
     reconcileSend(); renderTitle(); renderSettled();
@@ -2848,6 +3210,7 @@ async function refreshMessages() {
   }
 }
 async function refreshSessions() {
+  if (visibleAgent()) return; // read-only agent view: nothing to ask pi
   const gen = bootGen;
   try {
     const res = await invokeScoped<{sessions: SessionInfo[]}>("pi_list_sessions");
@@ -2862,6 +3225,7 @@ async function refreshSessions() {
 }
 
 async function refreshModels() {
+  if (visibleAgent()) return; // read-only agent view: nothing to ask pi
   const gen = bootGen;
   try {
     const res = (await invokeScoped("pi_get_models")) as { models: { id: string; provider: string }[]; current: string | null };
@@ -2869,6 +3233,7 @@ async function refreshModels() {
     // Grouped by provider; the trigger shows just the model id.
     const items: PickerItem[] = (res.models ?? []).map((m) => ({
       value: `${m.provider}/${m.id}`, label: m.id, group: m.provider, title: `${m.provider}/${m.id}`,
+      hint: recommendedHint(`${m.provider}/${m.id}`),
     }));
     items.sort((x, y) => (x.group ?? "").localeCompare(y.group ?? "") || 0);
     const cur = modelPicker.state.value;
@@ -3062,6 +3427,7 @@ ctxCircle.onclick = () => {
   else openContextUsage();
 };
 async function refreshStats() {
+  if (visibleAgent()) return; // read-only agent view: nothing to ask pi
   const gen = bootGen;
   try {
     const s = (await invokeScoped("pi_get_stats")) as UsageSnap;
@@ -3200,7 +3566,10 @@ async function doAbort() {
   stopping = true;
   updateSendState();
   try {
-    await invokeScoped("pi_abort");
+    const agent = visibleAgent();
+    // An agent's runner aborts pi itself and records `cancelled`.
+    if (agent) await invokeChecked("pi_agent_cancel", { id: agent.id });
+    else await invokeScoped("pi_abort");
     // actual settle arrives via agent_settled; Stopping… stays until then
   } catch (e) {
     stopping = false;
@@ -3272,6 +3641,8 @@ function renderQueue() {
 // the scope to the right process (spawning/switching inside it) and returns
 // that session as truth. Running turns elsewhere keep streaming.
 async function openSession(project: string, path: string | null) {
+  const runningAgent = path ? activeAgentFor(path) : null;
+  if (runningAgent) { await openAgentChat(runningAgent); return; }
   if (navigating || booting || sendInFlight) {
     if (sendInFlight) notify({ text: "Sending your message — one moment, then click again." });
     return;
@@ -3326,6 +3697,7 @@ async function newChatInProject(project: string): Promise<string | null> {
 async function setCwd(ncwd: string) { await openSession(ncwd, null); }
 
 async function doCompact() {
+  if (agentGuard()) return;
   if (streaming || booting || navigating) { notify({text: "Wait for the current turn to finish before compacting."}); return; }
   try {
     statusLine.textContent = activityLabel("compacting");
@@ -3340,6 +3712,7 @@ async function doCompact() {
 }
 
 async function doExport() {
+  if (agentGuard()) return;
   try {
     const r = (await invokeScoped("pi_export")) as { path: string };
     notify({ text: `Exported to ${r.path}` });
@@ -3503,7 +3876,10 @@ function showExtensionDialog(req: PiEvent) {
       respondUi(id, { cancelled: true });
     }
   });
-  dialogs.set(id, {id, card, inFlight: false});
+  // Answer where the request came from — a background chat or a CLI agent —
+  // never through whichever chat happens to be visible.
+  const scope = typeof req.cwd === "string" ? { cwd: req.cwd, session: typeof req.session === "string" ? req.session : null } : null;
+  dialogs.set(id, {id, card, inFlight: false, scope});
   dialogSlot.appendChild(card);
   syncDialogs();
   renderStatus();
@@ -3529,7 +3905,8 @@ async function respondUi(id: string, payload: Record<string, unknown>) {
   const st = d.card.querySelector<HTMLElement>(".dialog-state")!;
   st.className = "dialog-state pending"; st.textContent = "Responding…";
   try {
-    await invokeScoped("pi_ui_response", {id, payload});
+    if (d.scope) await invokeChecked("pi_ui_response", { ...d.scope, id, payload });
+    else await invokeScoped("pi_ui_response", {id, payload});
     if (dialogs.get(id) !== d) return;
     dialogs.delete(id); d.card.remove(); syncDialogs(); renderStatus();
     if (!dialogs.size) inputEl.focus();
@@ -3587,7 +3964,9 @@ async function handleEvent(p: PiEvent) {
     notify({ text: "A background chat's process exited. Reopen it to continue." });
     await refreshAllProjects(); return;
   }
-  if (t === "extension_ui_request") { showExtensionDialog(p); return; }
+  if (t === "agent_update") { onAgentUpdate(p.agent as AgentRecord | undefined); return; }
+  // Headless agents never prompt (their runner dismisses dialogs itself).
+  if (t === "extension_ui_request") { if (!p.external) showExtensionDialog(p); return; }
   // Route by owning chat: untagged events (preview fixtures) belong here.
   // While the visible chat has no session file yet, same-cwd tagged events
   // are also this view's (pre-adopt window, idea 5 / R2-F1).
@@ -3637,6 +4016,13 @@ async function handleEvent(p: PiEvent) {
     }
     if (t === "tool_execution_end" && p.isError) expandedTools.add(`tool-${p.toolCallId}`);
     renderStatus(); queueStreamUpdate();
+  }
+  if (t === "agent_settled" && visibleAgent()) {
+    // A CLI agent finished in the open chat: show its final transcript from
+    // the file; its `agent_update` then turns this into an ordinary chat.
+    if (key !== null) runningSet.delete(key);
+    await refreshMessages();
+    return;
   }
   if (t === "agent_settled") {
     if (key !== null) runningSet.delete(key);
@@ -3801,6 +4187,7 @@ composerWrap.addEventListener("drop", (e) => {
 interface SkillCmd { name: string; description?: string; location?: string; source?: string }
 const commandCache = new Map<string, SkillCmd[]>();
 async function refreshCommands() {
+  if (visibleAgent()) return;
   if (commandCache.has(cwd)) return;
   try {
     const r = await invokeScoped<{ commands: SkillCmd[] }>("pi_get_commands");
@@ -4099,7 +4486,7 @@ searchEl.addEventListener("keydown", (e) => {
   if (e.key !== "ArrowDown" && e.key !== "Enter") return;
   // Flush a pending debounce so the list reflects exactly what was typed.
   if (debounceT) { window.clearTimeout(debounceT); debounceT = null; filter = searchEl.value; visibleLimit = 100; renderProjects(); }
-  const first = chatListEl.querySelector<HTMLButtonElement>(".chat-item:not(:disabled)");
+  const first = chatListEl.querySelector<HTMLButtonElement>(".agent-item:not(:disabled), .chat-item:not(:disabled)");
   if (!first) return;
   e.preventDefault();
   if (e.key === "ArrowDown") first.focus();
@@ -4185,6 +4572,7 @@ async function boot(_respawn = false): Promise<void> {
       restoreQueueBar();
       booting = false; restoreDraft(); updateSkillPop();
       await refreshMessages(); await refreshSessions(); await refreshAllProjects(); await refreshModels(); await refreshCommands(); await refreshStats();
+      void refreshAgentModels();
       void refreshBranch();
       if (gen !== bootGen) return;
       hideConnError(); renderSettled(); inputEl.focus();

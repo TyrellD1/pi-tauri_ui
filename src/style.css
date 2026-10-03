@@ -866,6 +866,9 @@ dl.keys dd { color: var(--muted); }
 .dialog-card { box-shadow: none; }
 .dialog-actions { position: sticky; bottom: 0; background: var(--surface); padding-top: 6px; }
 .modal .dialog-actions { background: var(--page); }
+/* The sticky footer also covers the modal's bottom padding, so scrolled
+   content never peeks out beneath it. */
+.modal > .dialog-actions { bottom: -20px; padding-bottom: 20px; margin-bottom: -20px; }
 .tbl-wrap { width: 100%; overflow-x: auto; margin: 12px 0; }
 .tbl-wrap table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
 .tbl-wrap th, .tbl-wrap td { padding: 7px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
@@ -873,3 +876,57 @@ dl.keys dd { color: var(--muted); }
 @media (max-width: 960px) { .messages-inner { padding-left: 31px; padding-right: 31px; } }
 
 .user-meta { flex-wrap: wrap; }
+
+/* ---------- CLI agents ---------- */
+.agent-item {
+  display: block; width: 100%; text-align: left; position: relative;
+  padding: 8px 10px; border-radius: var(--radius); cursor: pointer;
+  border: none; background: none; margin-bottom: 2px; font-family: var(--font);
+}
+.agent-item:hover { background: var(--surface-deep); }
+.agent-item[aria-current="true"] { background: var(--surface-deep); }
+.agent-item[aria-current="true"]::before { content: ""; position: absolute; left: 0; top: 9px; bottom: 9px; width: 2px; border-radius: 2px; background: var(--strong); }
+.agent-item:disabled { cursor: default; }
+.agent-item .ci-row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.agent-item .ci-title { flex: 1; min-width: 0; font-size: 13px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-item .ci-time { font-size: 11px; color: var(--quiet); flex-shrink: 0; }
+.agent-item .ci-sub { font-size: 12px; color: var(--quiet); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-chip {
+  font-size: 10px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px;
+  padding: 0 5px; line-height: 16px; flex-shrink: 0; align-self: center; font-family: var(--mono);
+}
+.agent-chip.bad { color: var(--error); background: var(--error-bg); }
+.agents-count { font-size: 10.5px; color: var(--quiet); font-family: var(--mono); padding-right: 6px; white-space: nowrap; }
+.agents-foot { display: flex; gap: 4px; }
+.agents-foot .show-more { flex: 1; }
+.agent-banner {
+  display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  padding: 8px 8px 8px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); font-size: 12.5px; color: var(--muted);
+  animation: rise-in 160ms ease-out;
+}
+.agent-banner.hidden { display: none; }
+.agent-banner .ab-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-banner strong { color: var(--ink); font-weight: 500; }
+.agent-banner button {
+  border: 1px solid var(--line); background: var(--page); color: var(--ink); border-radius: 6px;
+  font-size: 12px; padding: 4px 12px; cursor: pointer; font-family: var(--font); flex-shrink: 0;
+}
+.agent-banner button:hover:not(:disabled) { background: var(--surface-deep); }
+.agent-banner button:disabled { opacity: 0.6; cursor: default; }
+.agent-models { display: flex; flex-direction: column; gap: 8px; }
+.am-row { border: 1px solid var(--line); border-radius: var(--radius); padding: 9px 11px; background: var(--surface); }
+.am-head { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+.am-head code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.am-line { font-size: 12px; color: var(--muted); line-height: 1.5; }
+.am-line span { display: inline-block; width: 44px; color: var(--quiet); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.am-note { margin: 2px 0 0 0 !important; }
+.am-note code { font-family: var(--mono); font-size: 11px; background: var(--surface); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; word-break: break-word; }
+@media (prefers-reduced-motion: reduce) { .agent-banner { animation: none; } }
+
+/* a project's "Headless subagents" sub-folder */
+.subfolder { margin-top: 2px; }
+.subfolder-head { padding: 5px 8px; }
+.subfolder-head .p-name { font-size: 12px; font-weight: 500; color: var(--muted); }
+.subfolder-head:hover .p-name { color: var(--ink); }
+.subfolder .project-chats { padding-left: 12px; }

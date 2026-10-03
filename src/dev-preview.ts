@@ -11,6 +11,12 @@ let failNavigation = false;
 let failResponse = false, calls: {cmd: string; args?: Record<string, unknown>}[] = [];
 let createdSessions: {path:string;id:string;name:string|null;preview:string;mtime:number;messageCount:number}[] = [];
 let queued: string[] = [];
+// CLI agents (pi-agent): registry fixtures + a raw emitter for their
+// externally-tagged events (they never touch the chat fixture above).
+type AgentFixture = {id:string;name:string;cwd:string;status:string;sessionFile?:string|null;queuePosition?:number|null;model?:string;caller?:string;task?:string;createdAt:number;startedAt?:number|null;endedAt?:number|null;error?:string|null};
+let agentFixtures: AgentFixture[] = [];
+function emitRaw(p: Record<string, unknown>) { listener?.({payload: clone(p)}); }
+const AGENT_MODELS = {default:'opencode-go/muse-spark-1.3-contributor',maxConcurrent:12,models:[{id:'opencode-go/muse-spark-1.3-contributor',use:'Default for delegated coding work: reading code, scoped edits, running tests, and reporting back.',avoid:'Skip it for ambiguous architecture calls or long open-ended investigations.'},{id:'anthropic/claude-sonnet-4',use:'Hard reasoning, design reviews, and tricky debugging.',avoid:'Bulk mechanical edits where a cheaper model does fine.'}]};
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const clone = <T>(v: T): T => structuredClone(v);
 const sleep = (ms = 30) => new Promise(r => setTimeout(r, ms));
@@ -40,7 +46,9 @@ function previewSessions() {
   // Chats created in this session must list too — the real backend does, and
   // the sidebar expects the active chat to be present (queue/run-state checks
   // navigate back to it by position).
-  return [...createdSessions, ...generated];
+  // Headless subagent chats are ordinary pi sessions named "[agent] …".
+  const headless = agentFixtures.filter(a=>a.sessionFile).map((a,i)=>({path:a.sessionFile!,id:a.id,name:`[agent] ${a.name}`,preview:a.task ?? a.name,mtime:Date.now()-i*1000,messageCount:2}));
+  return [...headless, ...createdSessions, ...generated];
 }
 function user(message: string, images: unknown[] = []): Message {
   return {role:'user',content:[...(message ? [{type:'text',text:message}] : []), ...images.map(im=>({...(im as object),type:'image'}))],timestamp:Date.now()};
@@ -112,6 +120,25 @@ export function installPreview() {
       if(cmd === 'pi_export') return {path:'/preview/export.html'};
       if(cmd === 'pi_open_path') return {ok:true};
       if(cmd === 'pi_git_branch') return {branch:'preview-branch'};
+      if(cmd === 'pi_agents_list') return {agents:clone(agentFixtures),maxConcurrent:12,running:agentFixtures.filter(a=>a.status==='running').length,queued:agentFixtures.filter(a=>a.status==='queued').length};
+      if(cmd === 'pi_agent_models') return clone(AGENT_MODELS);
+      if(cmd === 'pi_read_session') {
+        const a = agentFixtures.find(x=>x.sessionFile===args?.path);
+        if(!a) return {success:false,error:'not an agent session'};
+        return {messages:[{role:'user',content:a.task ?? a.name,timestamp:a.createdAt},{role:'assistant',content:[{type:'text',text:`Working on: ${a.name}.`}],timestamp:a.createdAt+1}]};
+      }
+      if(cmd === 'pi_agent_cancel') {
+        const a = agentFixtures.find(x=>x.id===args?.id);
+        if(a && (a.status==='running'||a.status==='queued')) {
+          setTimeout(()=>{
+            if(a.sessionFile) emitRaw({type:'agent_settled',cwd:a.cwd,session:a.sessionFile,external:true});
+            a.status='cancelled'; a.endedAt=Date.now(); a.error='cancelled';
+            emitRaw({type:'agent_update',agent:clone(a)});
+          },20);
+        }
+        return {ok:true};
+      }
+      if(cmd === 'pi_agents_clear') { const before=agentFixtures.length; agentFixtures=agentFixtures.filter(a=>a.status==='running'||a.status==='queued'); return {removed:before-agentFixtures.length}; }
       return {success:true};
     }
   });
@@ -119,7 +146,7 @@ export function installPreview() {
   panel.style.cssText='position:fixed;left:12px;bottom:60px;z-index:80;width:200px;max-height:60vh;overflow:auto;background:var(--page);border:1px solid var(--line);border-radius:8px;padding:8px;font:12px var(--font);box-shadow:0 4px 16px #0001';
   const summary=document.createElement('summary'); summary.textContent='Preview scenarios'; panel.append(summary);
   const select=document.createElement('select'); select.setAttribute('aria-label','Preview scenario'); select.style.cssText='width:100%;margin:8px 0;background:var(--surface);color:var(--ink)';
-  for(const s of ['Populated','Empty','Streaming','Permissions','Rejected send']) { const o=document.createElement('option');o.textContent=s;select.append(o); } panel.append(select);
+  for(const s of ['Populated','Empty','Streaming','Permissions','Rejected send','Agents']) { const o=document.createElement('option');o.textContent=s;select.append(o); } panel.append(select);
   const button=(label:string,fn:()=>void)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.style.cssText='display:block;width:100%;margin:6px 0;padding:5px;background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:5px';b.onclick=fn;panel.append(b);return b;};
   button('Load scenario',()=>void loadScenario(select.value));
   button('Next stream step',()=>streamStep());
@@ -276,6 +303,32 @@ export function installPreview() {
       tkInput.value='max';tkInput.dispatchEvent(new Event('input',{bubbles:true}));
       tkInput.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));await sleep(60);
       check('thinking pick calls set_thinking',[...calls].reverse().find(c=>c.cmd==='pi_set_thinking')?.args?.level==='max');
+      // CLI agents: listed live, open read-only (no pi process), stream, stop.
+      typeSearch('');await sleep(200);await loadScenario('Agents');await sleep(120);
+      check('agents section lists running, queued, done, failed',$('chat-list').querySelectorAll('.agent-item').length===4 && $('chat-list').textContent!.includes('#1') && !!$('chat-list').querySelector('.agent-item .run-spin'));
+      $('chat-list').querySelectorAll<HTMLButtonElement>('.parent-head').forEach(h=>{ if(h.textContent?.includes('Recent') && h.getAttribute('aria-expanded')==='false') h.click(); });await sleep(60);
+      const projBox2=[...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!;
+      const sub=projBox2.querySelector<HTMLButtonElement>('.subfolder-head');
+      check('headless chats sit in the project sub-folder, not its top level or Recent',
+        !!sub && sub.textContent!.includes('Headless subagents') && !projBox2.querySelector(':scope > .project-chats > .chat-item[data-headless]') && !$('chat-list').querySelector('[aria-label="Recent"] [data-headless]'));
+      sub!.click();await sleep(60);
+      check('opening the sub-folder lists the agent chats',[...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!.querySelectorAll('.subfolder .chat-item[data-headless]').length===3);
+      [...$('chat-list').querySelectorAll('.project-section')].find(s=>s.getAttribute('aria-label')===cwd)!.querySelector<HTMLElement>('.subfolder .chat-item')!.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,clientX:60,clientY:60}));await sleep(40);
+      check('headless chats offer no group actions',!!$('menu-root').querySelector('.menu-item') && !$('menu-root').textContent!.includes('Add to group'));
+      document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));await sleep(20);
+      const beforeOpen2=calls.length;
+      $('chat-list').querySelector<HTMLButtonElement>('.agent-item')!.click();await sleep(120);
+      const opened2=calls.slice(beforeOpen2).map(c=>c.cmd);
+      check('running agent chat opens read-only from its session file',opened2.includes('pi_read_session') && !opened2.some(c=>['pi_get_state','pi_get_messages','pi_get_stats','pi_list_sessions'].includes(c)) && $<HTMLTextAreaElement>('input').disabled && !$('agent-banner').classList.contains('hidden') && $('messages-inner').textContent!.includes('Working on: Audit dependencies.'));
+      const ag=agentFixtures[0];
+      emitRaw({type:'message_start',message:{role:'assistant',content:[]},cwd:ag.cwd,session:ag.sessionFile,external:true});
+      emitRaw({type:'message_update',assistantMessageEvent:{type:'text_delta',contentIndex:0,delta:'Live from the agent'},cwd:ag.cwd,session:ag.sessionFile,external:true});
+      await sleep(80);
+      check('agent events stream into the open chat',$('messages-inner').textContent!.includes('Live from the agent'));
+      $('agent-banner').querySelector<HTMLButtonElement>('button')!.click();await sleep(150);
+      check('Stop cancels the agent via its runner',[...calls].reverse().find(c=>c.cmd==='pi_agent_cancel')?.args?.id===ag.id);
+      check('finished agent chat becomes an ordinary chat',!$<HTMLTextAreaElement>('input').disabled && $('agent-banner').classList.contains('hidden'));
+      agentFixtures=[];
       typeSearch('');await sleep(200);await loadScenario('Populated');
       check('tables render without literal syntax',!!$('messages-inner').querySelector('table'));
       result.textContent=report.join('\n')+`\n\n${report.length} checks passed.`;
@@ -291,6 +344,16 @@ async function loadScenario(name:string) {
   scenario=name;step=0;$('btn-new').click();await sleep(100);
   if(name==='Streaming') {accepted('Review the interface while I keep working.');streamStep();}
   if(name==='Permissions') emit({type:'extension_ui_request',method:'confirm',id:`permission-${++nextId}`,title:'Run the build?',message:'pi wants to run npm run build in your project folder.'});
+  if(name==='Agents') {
+    const now=Date.now();
+    agentFixtures=[
+      {id:'ag-20261002-101500-a1b2',name:'Audit dependencies',cwd,status:'running',sessionFile:'/preview/agents/a1b2.jsonl',model:'opencode-go/muse-spark-1.3-contributor',caller:'claude-code',task:'Audit package.json dependencies and report unused ones.',createdAt:now-180000,startedAt:now-170000},
+      {id:'ag-20261002-101600-c3d4',name:'Write migration notes',cwd,status:'queued',queuePosition:1,model:'opencode-go/muse-spark-1.3-contributor',caller:'claude-code',createdAt:now-60000},
+      {id:'ag-20261002-094000-e5f6',name:'Fix flaky queue test',cwd,status:'done',sessionFile:'/preview/agents/e5f6.jsonl',model:'opencode-go/muse-spark-1.3-contributor',caller:'cli',createdAt:now-3600000,startedAt:now-3590000,endedAt:now-3000000},
+      {id:'ag-20261002-090000-g7h8',name:'Profile startup',cwd,status:'failed',sessionFile:'/preview/agents/g7h8.jsonl',model:'anthropic/claude-sonnet-4',caller:'cli',error:'fake provider error',createdAt:now-7200000,startedAt:now-7190000,endedAt:now-7100000},
+    ];
+    for(const a of agentFixtures) emitRaw({type:'agent_update',agent:clone(a)});
+  }
   if(name==='Rejected send') {rejectNext=true;type('Please check the latest changes');$('btn-send').click();await sleep();type('A newer draft, safely kept');holdSend?.();}
 }
 function streamStep() {

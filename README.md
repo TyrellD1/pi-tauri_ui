@@ -41,6 +41,26 @@ Sessions are cwd-bound (pi behavior). The backend keeps one `pi --mode rpc` proc
 
 Chats made by code carry a `[code]` name prefix (plus a local `code` badge that survives restarts) and can be filed into groups on creation: right-click empty sidebar → New coded chat, or call the `pi_coded_chat` Tauri command (`{ cwd, name, first_message? }`) from a future extension.
 
+## Agents from the CLI (`pi-agent`)
+
+Any caller (a terminal, a script, Claude Code) can hand work to a pi agent. `npm run install` (`install-latest.sh`) links the `pi-agent` command onto your PATH automatically, next to `pi`. To link it without rebuilding the app, run `npm run install:cli`.
+
+```bash
+pi-agent run --cwd ~/code/app "Find unused exports in src/ and list them"   # answer on stdout
+```
+
+- **Kept apart in the app.** Agents run headless with pi's normal full permissions, so nothing prompts. Their chats
+  live only in the sidebar's **Headless subagents** section (with queued / running / done / failed status) and in a
+  **Headless subagents** sub-folder inside each project. They never appear in Recent, in groups, or among a project's
+  own chats.
+- **Live while it runs.** With the app open you can watch an agent stream and stop it. The chat is read-only while
+  the agent runs and writable once it finishes.
+- **Queue.** At most 12 agents run at once (`pi-agent config set max-concurrent N`); the rest queue.
+- **Recommended models.** A shared list with when-to-use and when-not-to-use notes. The default is
+  `opencode-go/muse-spark-1.3-contributor`; edit it with `pi-agent models set|default|remove`.
+
+Full reference: [docs/pi-agent.md](./docs/pi-agent.md). Design: [docs/pi-agent-cli-plan.md](./docs/pi-agent-cli-plan.md).
+
 ## Shortcuts & send contract
 
 - `Enter` send (idle) / steer (running with a draft) · running + empty draft + `Enter` = no action
@@ -57,7 +77,7 @@ The header holds a sidebar toggle, a `project › chat` breadcrumb (click the pr
 
 ```bash
 npm run build
-npm test
+npm test            # logic + controller + pi-agent CLI end-to-end (fake pi, no model calls)
 cargo test --manifest-path src-tauri/Cargo.toml
 npm run tauri build
 ```
