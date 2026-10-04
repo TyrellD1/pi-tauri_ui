@@ -17,4 +17,4 @@ pi-agent list | status ID | result ID | cancel ID
 
 - Briefs must be self-contained: the agent sees none of your context.
 - Exit codes: `0` done, `1` failed, `130` cancelled, `2` bad input. `--json` for structured output.
-- Run `pi-agent guide` for the full brief. Docs: `docs/pi-agent.md`.
+- Run `pi-agent guide` for the full brief.
