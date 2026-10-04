@@ -7,6 +7,7 @@ import {
   canSend,
   envelopeError,
   fmtRelative,
+  fmtResets,
   queueSummary,
   renderMarkdown,
   toolSummary,
@@ -3296,11 +3297,13 @@ function renderCtxCircle() {
 // with the trigger's right edge and a few pixels above it. Toggle on the
 // trigger, Esc or outside click to dismiss, focus restored on close.
 let popoverEl: HTMLElement | null = null;
+let popoverAnchor: HTMLElement | null = null;
 let popoverOutside: ((e: MouseEvent) => void) | null = null;
 function closePopover() {
   popoverEl?.remove();
   popoverEl = null;
-  ctxCircle.setAttribute("aria-expanded", "false");
+  popoverAnchor?.setAttribute("aria-expanded", "false");
+  popoverAnchor = null;
   if (popoverOutside) {
     document.removeEventListener("mousedown", popoverOutside);
     popoverOutside = null;
@@ -3333,6 +3336,7 @@ function openPopover(anchor: HTMLElement, build: (box: HTMLElement, close: () =>
   }
   anchor.setAttribute("aria-expanded", "true");
   popoverEl = box;
+  popoverAnchor = anchor;
   popoverOutside = (e: MouseEvent) => {
     if (!box.contains(e.target as Node) && !anchor.contains(e.target as Node)) closePopover();
   };
@@ -3423,9 +3427,105 @@ function openContextUsage() {
 }
 renderCtxCircle();
 ctxCircle.onclick = () => {
-  if (popoverEl) closePopover();
+  if (popoverAnchor === ctxCircle) closePopover();
   else openContextUsage();
 };
+
+// OpenCode Go plan usage: a sidebar button that exists only when the opencode
+// CLI has a Go key saved. Fetched when the popover opens, never on a timer.
+type OcWindow = { status?: string; percent?: number; resetsAt?: string };
+type OcUsage = Partial<Record<"rolling" | "weekly" | "monthly", OcWindow>>;
+const OC_WINDOWS: [keyof OcUsage, string][] = [["rolling", "5-hour limit"], ["weekly", "Weekly"], ["monthly", "Monthly"]];
+const ocBtn = $("btn-oc-usage") as HTMLButtonElement;
+let ocUsage: OcUsage | null = null;
+function openOpencodeUsage() {
+  openPopover(ocBtn, (box) => {
+    const h = document.createElement("h3");
+    h.className = "use-title";
+    h.textContent = "Plan usage limits · OpenCode Go";
+    box.appendChild(h);
+    const rows = OC_WINDOWS.map(([key, label]) => {
+      const row = document.createElement("div");
+      row.className = "use-row";
+      const line = document.createElement("div");
+      line.className = "use-line";
+      const name = document.createElement("span");
+      name.className = "use-name";
+      name.textContent = label;
+      const reset = document.createElement("span");
+      reset.className = "use-reset";
+      const pct = document.createElement("span");
+      pct.className = "use-pct";
+      line.append(name, reset, pct);
+      const bar = document.createElement("div");
+      bar.className = "use-bar";
+      const fill = document.createElement("div");
+      fill.className = "fill";
+      bar.appendChild(fill);
+      row.append(line, bar);
+      box.appendChild(row);
+      return { key, row, reset, pct, fill };
+    });
+    const note = document.createElement("p");
+    note.className = "use-note";
+    box.appendChild(note);
+    const actions = document.createElement("div");
+    actions.className = "dialog-actions";
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.onclick = () => void load();
+    actions.appendChild(retry);
+    box.appendChild(actions);
+
+    // Rows keep their place while loading, so nothing shifts when data lands.
+    const paint = (u: OcUsage | null) => {
+      for (const r of rows) {
+        const w = u?.[r.key];
+        const p = typeof w?.percent === "number" ? Math.max(0, Math.round(w.percent)) : null;
+        const limited = w?.status === "rate-limited";
+        r.row.classList.toggle("hot", limited || (p != null && p >= 90));
+        r.pct.textContent = p != null ? `${p}%` : "—";
+        const resets = w?.resetsAt ? fmtResets(w.resetsAt) : "";
+        r.reset.textContent = limited && resets ? `Limit reached · ${resets}` : resets;
+        r.fill.style.transform = `scaleX(${Math.min(100, p ?? 0) / 100})`;
+      }
+    };
+    const status = (text: string, error = false) => {
+      note.textContent = text;
+      note.classList.toggle("error", error);
+      note.hidden = !text;
+      actions.hidden = !error;
+    };
+    async function load() {
+      status(ocUsage ? "" : "Checking usage…");
+      try {
+        const r = await invokeChecked<{ usage: OcUsage }>("pi_opencode_usage");
+        ocUsage = r.usage;
+        if (!box.isConnected) return;
+        paint(ocUsage);
+        status("");
+      } catch (e) {
+        if (box.isConnected) status(e instanceof Error ? e.message : String(e), true);
+      }
+    }
+    // Last known numbers show at once; the fresh ones replace them in place.
+    paint(ocUsage);
+    void load();
+  });
+}
+ocBtn.onclick = () => {
+  if (popoverAnchor === ocBtn) closePopover();
+  else openOpencodeUsage();
+};
+// The remembered answer renders before the check returns, so the footer
+// doesn't grow a row a moment after launch.
+ocBtn.classList.toggle("hidden", prefGet("pi-opencode") !== "1");
+void invoke<{ detected?: boolean }>("pi_opencode_detect").then((r) => {
+  const on = r?.detected === true;
+  ocBtn.classList.toggle("hidden", !on);
+  prefSet("pi-opencode", on ? "1" : "0");
+}).catch(() => {});
 async function refreshStats() {
   if (visibleAgent()) return; // read-only agent view: nothing to ask pi
   const gen = bootGen;

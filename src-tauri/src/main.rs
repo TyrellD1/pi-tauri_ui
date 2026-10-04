@@ -770,6 +770,72 @@ async fn pi_git_branch(cwd: String) -> Result<Value, String> {
     Ok(serde_json::json!({ "branch": branch }))
 }
 
+/// OpenCode Go plan usage for the sidebar popover. The key is the one the
+/// opencode CLI already stores; it is read on demand and never leaves this
+/// process except as the Authorization header to opencode.ai.
+const OPENCODE_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
+
+fn opencode_auth_path() -> Option<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
+    Some(data.join("opencode").join("auth.json"))
+}
+
+fn opencode_go_key_in(raw: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(raw).ok()?;
+    let key = v.get("opencode-go")?.get("key")?.as_str()?.trim();
+    // A key with a line break could smuggle extra headers into the request.
+    if key.is_empty() || key.chars().any(|c| c.is_control()) { return None; }
+    Some(key.to_string())
+}
+
+fn opencode_go_key() -> Option<String> {
+    opencode_go_key_in(&std::fs::read_to_string(opencode_auth_path()?).ok()?)
+}
+
+/// Splits curl's `body\nstatus` output and turns a non-200 into a sentence.
+fn parse_opencode_usage(out: &str) -> Result<Value, String> {
+    let (body, code) = out.trim_end().rsplit_once('\n').unwrap_or(("", out.trim()));
+    match code.trim() {
+        "200" => {
+            let v: Value = serde_json::from_str(body).map_err(|_| "OpenCode sent a reply this app can't read.".to_string())?;
+            let usage = v.get("usage").filter(|u| u.is_object()).ok_or("OpenCode sent a reply with no usage in it.")?;
+            Ok(serde_json::json!({ "usage": usage }))
+        }
+        "401" => Err("OpenCode rejected the saved key. Run `opencode auth login` to refresh it.".into()),
+        "403" => Err("This key has no OpenCode Go subscription.".into()),
+        other => Err(format!("OpenCode returned HTTP {}.", other)),
+    }
+}
+
+#[tauri::command]
+fn pi_opencode_detect() -> Value {
+    serde_json::json!({ "detected": opencode_go_key().is_some() })
+}
+
+#[tauri::command]
+async fn pi_opencode_usage() -> Result<Value, String> {
+    let key = opencode_go_key().ok_or("No OpenCode Go key found. Run `opencode auth login`.")?;
+    // curl ships with the OS, so no HTTP client is compiled in. The header
+    // goes over stdin: argv is visible to every process on the machine.
+    let mut child = Command::new("curl")
+        .args(["-sS", "--max-time", "15", "-H", "@-", "-w", "\n%{http_code}", OPENCODE_USAGE_URL])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn().map_err(|e| format!("Couldn't run curl: {}", e))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(format!("Authorization: Bearer {}\n", key).as_bytes()).await
+            .map_err(|e| format!("Couldn't send the request: {}", e))?;
+    }
+    let out = child.wait_with_output().await.map_err(|e| format!("curl failed: {}", e))?;
+    if !out.status.success() {
+        return Err("Couldn't reach opencode.ai. Check your connection.".into());
+    }
+    parse_opencode_usage(&String::from_utf8_lossy(&out.stdout))
+}
+
 #[tauri::command]
 async fn pi_coded_chat(cwd: String, name: String, first_message: Option<String>, app: AppHandle, pool: State<'_, Arc<Pool>>) -> Result<Value, String> {
     // A chat made by code: fresh session, `[code]`-prefixed name, optional
@@ -1009,6 +1075,19 @@ fn parse_session_preview(path: &PathBuf) -> (String, Option<String>, usize) {
 mod tests {
     use super::*;
     #[test]
+    fn opencode_key_and_usage_parsing() {
+        assert_eq!(opencode_go_key_in(r#"{"opencode-go":{"type":"api","key":" k1 "}}"#).as_deref(), Some("k1"));
+        assert!(opencode_go_key_in(r#"{"zai":{"type":"api","key":"k"}}"#).is_none());
+        assert!(opencode_go_key_in(r#"{"opencode-go":{"key":"a\nX-Evil: 1"}}"#).is_none());
+        assert!(opencode_go_key_in("not json").is_none());
+        let ok = parse_opencode_usage("{\"usage\":{\"weekly\":{\"percent\":3}}}\n200").unwrap();
+        assert_eq!(ok["usage"]["weekly"]["percent"], 3);
+        assert!(parse_opencode_usage("{}\n200").is_err());
+        assert!(parse_opencode_usage("Unauthorized\n401").unwrap_err().contains("opencode auth login"));
+        assert!(parse_opencode_usage("x\n403").unwrap_err().contains("subscription"));
+        assert!(parse_opencode_usage("\n502").unwrap_err().contains("502"));
+    }
+    #[test]
     fn sweep_plan_reaps_expired_then_oldest_idle_never_streaming() {
         let now = Instant::now();
         let ago = |s: u64| now - Duration::from_secs(s);
@@ -1141,6 +1220,8 @@ fn main() {
             pi_new_chat,
             pi_open_path,
             pi_git_branch,
+            pi_opencode_detect,
+            pi_opencode_usage,
             pi_coded_chat,
             pi_get_messages,
             pi_get_state,

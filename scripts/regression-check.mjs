@@ -81,6 +81,14 @@ check("writing label", logic.activityLabel("writing") === "Writing…");
 check("just now", logic.fmtRelative(Date.now() - 10_000) === "just now");
 check("minutes", logic.fmtRelative(Date.now() - 5 * 60_000) === "5m ago");
 check("hours", logic.fmtRelative(Date.now() - 3 * 3600_000) === "3h ago");
+const t0 = Date.parse("2026-10-03T12:00:00Z");
+check("resets minutes", logic.fmtResets("2026-10-03T12:12:00Z", t0) === "Resets in 12 min");
+check("resets hours", logic.fmtResets("2026-10-03T15:05:00Z", t0) === "Resets in 3 hr 5 min");
+check("resets whole hours", logic.fmtResets("2026-10-03T14:00:00Z", t0) === "Resets in 2 hr");
+check("resets weekday", /^Resets \w{3} \d/.test(logic.fmtResets("2026-10-05T00:00:00Z", t0)));
+check("resets date", /^Resets \w{3} \d{1,2}$/.test(logic.fmtResets("2026-10-16T22:39:06Z", t0)));
+check("resets past", logic.fmtResets("2026-10-03T11:00:00Z", t0) === "Resets soon");
+check("resets garbage", logic.fmtResets("nope", t0) === "");
 
 // 8. json fences pretty-print; long json collapses visually, copy keeps full text
 const ugly = logic.renderMarkdown("```json\n{\"b\":2,\"a\":[1,2]}\n```");

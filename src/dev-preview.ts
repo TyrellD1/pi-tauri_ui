@@ -120,6 +120,8 @@ export function installPreview() {
       if(cmd === 'pi_export') return {path:'/preview/export.html'};
       if(cmd === 'pi_open_path') return {ok:true};
       if(cmd === 'pi_git_branch') return {branch:'preview-branch'};
+      if(cmd === 'pi_opencode_detect') return {detected:true};
+      if(cmd === 'pi_opencode_usage') return {usage:{rolling:{status:'ok',percent:56,resetsAt:new Date(Date.now()+12*60000).toISOString()},weekly:{status:'ok',percent:25,resetsAt:new Date(Date.now()+3*86400000).toISOString()},monthly:{status:'ok',percent:12,resetsAt:new Date(Date.now()+13*86400000).toISOString()}}};
       if(cmd === 'pi_agents_list') return {agents:clone(agentFixtures),maxConcurrent:12,running:agentFixtures.filter(a=>a.status==='running').length,queued:agentFixtures.filter(a=>a.status==='queued').length};
       if(cmd === 'pi_agent_models') return clone(AGENT_MODELS);
       if(cmd === 'pi_read_session') {
