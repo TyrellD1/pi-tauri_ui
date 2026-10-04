@@ -217,6 +217,7 @@ h1 { margin: 0; }
   padding: 7px 10px; font-size: 13px; color: var(--muted);
   cursor: pointer; font-family: var(--font);
 }
+.settings-btn.hidden { display: none; }
 .settings-btn:hover { background: var(--surface-deep); color: var(--ink); }
 .settings-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -721,6 +722,20 @@ kbd {
 .dialog-actions button kbd { margin-left: 6px; font-size: 10px; padding: 1px 4px; border-bottom-width: 1px; }
 .dialog-actions button.primary kbd { color: var(--page); border-color: color-mix(in srgb, var(--page) 35%, transparent); background: transparent; }
 .dialog-state { font-size: 12px; margin-top: 8px; }
+/* plan usage popover: label left, reset + percent right, one bar per window */
+.use-title { margin: 0 0 12px 0; font-size: 12.5px; font-weight: 400; color: var(--quiet); }
+.use-row + .use-row { margin-top: 14px; }
+.use-line { display: flex; align-items: baseline; gap: 10px; font-size: 12.5px; }
+.use-line .use-name { color: var(--ink); font-weight: 500; }
+.use-line .use-reset { margin-left: auto; color: var(--quiet); white-space: nowrap; }
+.use-line .use-pct { color: var(--muted); min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
+.use-bar { height: 5px; border-radius: 3px; background: var(--surface-deep); margin-top: 7px; overflow: hidden; }
+.use-bar .fill { height: 100%; width: 100%; border-radius: 3px; background: var(--strong); transform-origin: left; transform: scaleX(0); transition: transform 180ms ease-out; }
+.use-row.hot .use-bar .fill { background: var(--warn); }
+.use-row.hot .use-pct { color: var(--warn); }
+.use-note { margin: 12px 0 0 0; font-size: 11.5px; color: var(--quiet); }
+.use-note.error { color: var(--error); }
+.popover [hidden] { display: none; }
 .dialog-state.error { color: var(--error); }
 .dialog-state.pending { color: var(--quiet); }
 
@@ -853,7 +868,7 @@ dl.keys dd { color: var(--muted); }
   .assistant-block.streaming .md > :last-child::after, .tool-toggle[data-state="running"] .t-state { animation: none; }
   .live-tail .dots i { animation: none; opacity: 0.6; }
   .picker-pop, .picker-trigger .pk-chev,
-  .notice, .menu, .popover, .modal, .modal-back, .dialog-card, .empty-state, .jump-latest { animation: none; transition: none; }
+  .notice, .menu, .popover, .use-bar .fill, .modal, .modal-back, .dialog-card, .empty-state, .jump-latest { animation: none; transition: none; }
   input.switch, input.switch::after, .msg-actions { transition: none; }
 }
 

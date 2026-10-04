@@ -151,6 +151,22 @@ export function fmtRelative(mtime: number, now = Date.now()): string {
   return new Date(mtime).toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
+// "Resets in 12 min" / "Resets in 3 hr 5 min" / "Resets Wed 12:00 PM" /
+// "Resets Oct 16" for a usage window's reset timestamp.
+export function fmtResets(resetsAt: string | number, now = Date.now()): string {
+  const at = typeof resetsAt === "number" ? resetsAt : Date.parse(resetsAt);
+  if (!Number.isFinite(at)) return "";
+  const m = Math.ceil((at - now) / 60000);
+  if (m <= 0) return "Resets soon";
+  if (m < 60) return `Resets in ${m} min`;
+  if (m < 24 * 60) return m % 60 ? `Resets in ${Math.floor(m / 60)} hr ${m % 60} min` : `Resets in ${m / 60} hr`;
+  const d = new Date(at);
+  if (m < 7 * 24 * 60) {
+    return `Resets ${d.toLocaleDateString([], { weekday: "short" })} ${d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+  }
+  return `Resets ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
+
 export function queueSummary(steering: string[], followUp: string[]): string {
   const parts: string[] = [];
   for (const s of steering) parts.push(`steering: ${s.slice(0, 80)}`);
