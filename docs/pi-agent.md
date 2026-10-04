@@ -90,6 +90,10 @@ dialog anyway, the runner dismisses it right away, with a note on stderr, so a r
 
 ## For AI callers (Claude Code and others)
 
+This repo ships a ready-made skill at `skills/pi-agent/SKILL.md`. It steers agents to `pi-agent` rather than the
+bare `pi` CLI. Copy or symlink it into your global skills folder, e.g.
+`ln -s "$PWD/skills/pi-agent" ~/.claude/skills/pi-agent`.
+
 `pi-agent guide` prints a short brief: how to delegate, plus the current model recommendations. Paste it into a
 `CLAUDE.md` / `AGENTS.md`, or have the caller run it first. A minimal snippet:
 
